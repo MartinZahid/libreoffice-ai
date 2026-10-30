@@ -1,0 +1,5 @@
+AI assistant for LibreOffice Writer, Calc and Impress.
+
+Open the chat from the AI Assistant menu, describe what you want to create or change, and review the proposal before applying it. All actions from one response are grouped into a single undo step.
+
+Works with the OpenCode Zen/Go OpenAI-compatible API. Your API key is stored locally in your LibreOffice profile.

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<oor:component-data xmlns:oor="http://openoffice.org/2001/registry"
+                    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                    oor:name="Addons"
+                    oor:package="org.openoffice.Office">
+  <node oor:name="AddonUI">
+    <node oor:name="OfficeMenuBar">
+      <node oor:name="org.libreofficeai.menubar" oor:op="replace">
+        <prop oor:name="Title" oor:type="xs:string">
+          <value xml:lang="es">Asistente IA</value>
+          <value xml:lang="en-US">AI Assistant</value>
+        </prop>
+        <prop oor:name="Context" oor:type="xs:string">
+          <value>com.sun.star.text.TextDocument,com.sun.star.text.WebDocument,com.sun.star.sheet.SpreadsheetDocument,com.sun.star.presentation.PresentationDocument,com.sun.star.drawing.DrawingDocument</value>
+        </prop>
+        <node oor:name="Submenu">
+          <node oor:name="M01" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="es">Abrir chat</value>
+              <value xml:lang="en-US">Open chat</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>org.libreofficeai:show</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+          <node oor:name="M02" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="es">Nuevo chat</value>
+              <value xml:lang="en-US">New chat</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>org.libreofficeai:new</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+          <node oor:name="M03" oor:op="replace">
+            <prop oor:name="URL">
+              <value>private:separator</value>
+            </prop>
+          </node>
+          <node oor:name="M04" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="es">Ajustes...</value>
+              <value xml:lang="en-US">Settings...</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>org.libreofficeai:settings</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+        </node>
+      </node>
+    </node>
+  </node>
+</oor:component-data>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE manifest:manifest PUBLIC "-//OpenOffice.org//DTD Manifest 1.0//EN" "Manifest.dtd">
+<manifest:manifest xmlns:manifest="http://openoffice.org/2001/manifest">
+  <manifest:file-entry manifest:full-path="pythonpath/main.py" manifest:media-type="application/vnd.sun.star.uno-component;type=Python"/>
+  <manifest:file-entry manifest:full-path="Addons.xcu" manifest:media-type="application/vnd.sun.star.configuration-data"/>
+  <manifest:file-entry manifest:full-path="ProtocolHandler.xcu" manifest:media-type="application/vnd.sun.star.configuration-data"/>
+  <manifest:file-entry manifest:full-path="description.xml" manifest:media-type="application/vnd.sun.star.package-bundle-description"/>
+  <manifest:file-entry manifest:full-path="registration/license.txt" manifest:media-type="text/plain"/>
+  <manifest:file-entry manifest:full-path="pkg-description/pkg-description.es" manifest:media-type="application/vnd.sun.star.package-bundle-description;locale=es"/>
+  <manifest:file-entry manifest:full-path="pkg-description/pkg-description.en" manifest:media-type="application/vnd.sun.star.package-bundle-description;locale=en"/>
+</manifest:manifest>

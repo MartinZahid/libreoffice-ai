@@ -1,0 +1,1 @@
+"""Native LibreOffice user interface."""
