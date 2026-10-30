@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any, Iterable
 
 import uno
 
-from .common import cm_to_100mm, set_optional
+from .common import bounded_float, cm_to_100mm, set_optional, validate_image_path
 
 TITLE_NAME = "LibreOfficeAI_Title"
 BODY_NAME = "LibreOfficeAI_Body"
@@ -212,17 +211,15 @@ class ImpressAdapter:
 
     def impress_insert_image(self, args: dict[str, Any]) -> None:
         page = self._page(args.get("slide_index"))
-        path = os.path.abspath(str(args.get("path", "")))
-        if not os.path.isfile(path):
-            raise ValueError(f"No existe la imagen: {path}")
+        path = validate_image_path(args.get("path"))
         shape = self.doc.createInstance("com.sun.star.drawing.GraphicObjectShape")
         shape.Position = self._point(
             cm_to_100mm(args.get("x_cm"), 2000),
             cm_to_100mm(args.get("y_cm"), 5000),
         )
         shape.Size = self._size(
-            cm_to_100mm(args.get("width_cm"), 12000),
-            cm_to_100mm(args.get("height_cm"), 9000),
+            cm_to_100mm(bounded_float(args.get("width_cm"), 12.0, 0.1, 100, "El ancho")),
+            cm_to_100mm(bounded_float(args.get("height_cm"), 9.0, 0.1, 100, "La altura")),
         )
         page.add(shape)
         shape.GraphicURL = uno.systemPathToFileUrl(path)

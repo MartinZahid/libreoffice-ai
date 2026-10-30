@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .adapters.common import document_kind
 from .tools import TOOLS_BY_NAME
 
 ACTION_LABELS = {
@@ -38,6 +39,18 @@ def _short(value: Any, limit: int = 60) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+def _formula_list(values: Any) -> list[str]:
+    formulas = []
+    if isinstance(values, list):
+        for row in values:
+            if not isinstance(row, list):
+                continue
+            for value in row:
+                if isinstance(value, str) and value.startswith("="):
+                    formulas.append(_short(value, 80))
+    return formulas
+
+
 def describe_action(action: dict[str, Any]) -> str:
     """Return a short Spanish summary used in the confirmation preview."""
     name = str(action.get("name") or "")
@@ -52,10 +65,17 @@ def describe_action(action: dict[str, Any]) -> str:
         rows = arguments.get("data") or []
         columns = max((len(row) for row in rows if isinstance(row, list)), default=0)
         details = f"{len(rows)} filas × {columns} columnas"
+        if name == "calc_create_table":
+            formulas = _formula_list(rows)
+            if formulas:
+                details += f"; fórmulas: {', '.join(formulas[:5])}"
     elif name == "writer_insert_list":
         details = f"{len(arguments.get('items') or [])} elementos"
     elif name == "calc_write_range":
         details = f"desde {arguments.get('start_cell', 'A1')}"
+        formulas = _formula_list(arguments.get("values"))
+        if formulas:
+            details += f"; fórmulas: {', '.join(formulas[:5])}"
     elif name in ("calc_format_range", "calc_sort_range"):
         details = str(arguments.get("range", ""))
     elif name == "calc_set_column_width":
@@ -74,12 +94,7 @@ def describe_action(action: dict[str, Any]) -> str:
 
 
 def _adapter_for(doc: Any, actions: list[dict[str, Any]]) -> Any:
-    text_doc = _supports(doc, "com.sun.star.text.TextDocument") or _supports(doc, "com.sun.star.text.WebDocument")
-    calc_doc = _supports(doc, "com.sun.star.sheet.SpreadsheetDocument")
-    impress_doc = _supports(doc, "com.sun.star.presentation.PresentationDocument") or _supports(
-        doc, "com.sun.star.drawing.DrawingDocument"
-    )
-
+    kind = document_kind(doc)
     prefix = ""
     for action in actions:
         name = str(action.get("name") or "")
@@ -88,33 +103,25 @@ def _adapter_for(doc: Any, actions: list[dict[str, Any]]) -> Any:
         if name.split("_", 1)[0] != prefix:
             raise ValueError("No se pueden mezclar acciones de distintos tipos de documento.")
 
-    if prefix == "writer" and text_doc:
+    if prefix == "writer" and kind == "writer":
         from .adapters.writer import WriterAdapter
 
         return WriterAdapter(doc)
-    if prefix == "calc" and calc_doc:
+    if prefix == "calc" and kind == "calc":
         from .adapters.calc import CalcAdapter
 
         return CalcAdapter(doc)
-    if prefix == "impress" and impress_doc:
+    if prefix == "impress" and kind in ("impress", "draw"):
         from .adapters.impress import ImpressAdapter
 
         return ImpressAdapter(doc)
     raise ValueError("Las acciones no corresponden al tipo de documento activo.")
 
 
-def _supports(doc: Any, service: str) -> bool:
-    try:
-        return bool(doc.supportsService(service))
-    except Exception:
-        return False
-
-
 class Executor:
     """Execute actions on the main thread and group them into one undo step."""
 
-    def __init__(self, ctx: Any = None):
-        self.ctx = ctx
+    PREVIEW_TITLE = "Asistente IA (vista previa)"
 
     def apply(self, doc: Any, actions: list[dict[str, Any]]) -> list[str]:
         if not actions:
@@ -126,49 +133,100 @@ class Executor:
             name = str(action.get("name") or "")
             if name not in TOOLS_BY_NAME:
                 raise ValueError(f"Acción desconocida: {name}")
-            if not isinstance(action.get("arguments") or {}, dict):
+            arguments = action.get("arguments")
+            if arguments is not None and not isinstance(arguments, dict):
                 raise ValueError(f"Argumentos inválidos para {name}.")
+            action["arguments"] = arguments or {}
 
         adapter = _adapter_for(doc, actions)
         descriptions = [describe_action(action) for action in actions]
-        undo = None
-        undo_open = False
         try:
             undo = doc.getUndoManager()
-            undo.enterUndoContext("Asistente IA (vista previa)")
-            undo_open = True
-        except Exception:
-            undo = None
+        except Exception as exc:
+            raise ValueError("No se pudo acceder al historial de deshacer del documento.") from exc
+        if undo is None:
+            raise ValueError("El documento no permite agrupar los cambios para deshacerlos.")
+        try:
+            undo.enterUndoContext(self.PREVIEW_TITLE)
+        except Exception as exc:
+            raise ValueError("No se pudo iniciar el grupo de deshacer de la vista previa.") from exc
 
+        applied = 0
         try:
             for action in actions:
                 adapter.execute(action)
-        except Exception:
-            if undo is not None and undo_open:
-                try:
-                    undo.leaveUndoContext()
-                except Exception:
-                    pass
-                try:
-                    undo.undo()
-                except Exception:
-                    pass
+                applied += 1
+        except Exception as exc:
+            rollback_error = self._rollback(undo, True, applied)
+            if rollback_error:
+                raise ValueError(
+                    f"Error al aplicar los cambios: {exc}. "
+                    f"Es posible que el documento quede parcialmente modificado: {rollback_error}"
+                ) from exc
             raise
         else:
-            if undo is not None and undo_open:
-                try:
-                    undo.leaveUndoContext()
-                except Exception:
-                    pass
+            try:
+                undo.leaveUndoContext()
+            except Exception as exc:
+                raise ValueError(
+                    "Los cambios se aplicaron, pero no se pudo cerrar el grupo de deshacer. "
+                    "Revisa el documento antes de continuar."
+                ) from exc
         return descriptions
 
     @staticmethod
-    def revert(doc: Any) -> None:
-        """Undo the last grouped preview as one step."""
+    def _rollback(undo: Any, undo_open: bool, applied: int) -> str:
+        problems = []
+        if undo_open:
+            try:
+                undo.leaveUndoContext()
+            except Exception as exc:
+                problems.append(f"no se pudo cerrar el grupo de deshacer ({exc})")
+        if undo is not None and Executor._preview_is_on_top(undo):
+            try:
+                undo.undo()
+            except Exception as exc:
+                problems.append(f"no se pudo deshacer ({exc})")
+        elif applied:
+            problems.append("no se pudo verificar la vista previa en el historial")
+        return "; ".join(problems)
+
+    @staticmethod
+    def _preview_is_on_top(undo: Any) -> bool:
+        try:
+            if not undo.isUndoPossible():
+                return False
+        except Exception:
+            pass
+        for method in (
+            "getCurrentUndoActionTitle",
+            "getCurrentUndoContextTitle",
+            "getUndoActionTitle",
+            "getUndoContextTitle",
+        ):
+            try:
+                title = getattr(undo, method)()
+            except Exception:
+                continue
+            if title and str(title).startswith("Asistente IA"):
+                return True
+        return False
+
+    @classmethod
+    def revert(cls, doc: Any) -> None:
+        """Undo only the grouped preview, never later user edits."""
         if doc is None:
             raise ValueError("No hay un documento abierto para deshacer la vista previa.")
         try:
             undo = doc.getUndoManager()
+        except Exception as exc:
+            raise ValueError("No se pudo acceder al historial de deshacer.") from exc
+        if not cls._preview_is_on_top(undo):
+            raise ValueError(
+                "No se puede rechazar la vista previa porque hay cambios posteriores "
+                "o ya no está disponible en el historial. Deshaz manualmente si es necesario."
+            )
+        try:
             undo.undo()
         except Exception as exc:
             raise ValueError("No se pudo deshacer la vista previa.") from exc

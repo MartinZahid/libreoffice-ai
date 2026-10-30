@@ -24,7 +24,6 @@ _OPEN: list["SettingsDialog"] = []
 class SettingsDialog:
     def __init__(self, ctx: Any, parent: Any = None):
         self.ctx = ctx
-        self.parent = parent
         self._base = load_config(ctx)
         self._closed = False
         model = _model(ctx, "com.sun.star.awt.UnoControlDialogModel")
@@ -85,7 +84,7 @@ class SettingsDialog:
             model, "timeout", 170, 140, 100, 26,
             layout, Text=str(self._base.timeout),
         )
-        _add_label(model, "lbl_tokens", 290, 144, 110, 18, "MÃ¡x. tokens", layout)
+        _add_label(model, "lbl_tokens", 290, 144, 110, 18, "Máx. tokens", layout)
         _add_edit(
             model, "max_tokens", 410, 140, 100, 26,
             layout, Text=str(self._base.max_tokens),
@@ -106,7 +105,7 @@ class SettingsDialog:
         )
         _add_label(
             model, "hint2", 16, 282, 608, 18,
-            "TambiÃ©n puedes usar la variable OPENCODE_API_KEY.", layout,
+            "También puedes usar la variable OPENCODE_API_KEY.", layout,
         )
         _add_button(model, "save", 350, 380, 120, 30, "Guardar", layout=layout)
         _add_button(model, "cancel", 480, 380, 120, 30, "Cancelar", layout=layout)
@@ -123,15 +122,23 @@ class SettingsDialog:
         elif command == "cancel":
             self._cancel()
 
+    def _number(self, name: str, label: str) -> str:
+        text = self._text(name)
+        try:
+            float(text)
+        except ValueError as exc:
+            raise ConfigError(f"{label} debe ser un número.") from exc
+        return text
+
     def _save(self) -> None:
         try:
             config = Config(
                 base_url=self._text("base_url"),
                 model=self._text("model"),
                 api_key=self._text("api_key"),
-                timeout=int(self._text("timeout")),
-                max_tokens=int(self._text("max_tokens")),
-                temperature=float(self._text("temperature")),
+                timeout=int(self._number("timeout", "El tiempo de espera")),
+                max_tokens=int(self._number("max_tokens", "El máximo de tokens")),
+                temperature=float(self._number("temperature", "La temperatura")),
                 max_context_chars=self._base.max_context_chars,
                 confirm_before_apply=bool(self._controls["confirm"].State),
             ).validate()

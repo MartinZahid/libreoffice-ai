@@ -63,37 +63,50 @@ class Agent:
         if document_context:
             user_content = f"{text}\n\n--- Contexto del documento ---\n{document_context}"
         self.messages.append({"role": "user", "content": user_content})
+        user_index = len(self.messages) - 1
 
         actions: list[dict[str, Any]] = []
         errors: list[str] = []
         final_text = ""
 
-        for _ in range(MAX_TOOL_ROUNDS):
-            message = self.client.chat(self.messages, tools=TOOLS)
-            tool_calls = message.get("tool_calls")
-            content = str(message.get("content") or "")
+        try:
+            for _ in range(MAX_TOOL_ROUNDS):
+                message = self.client.chat(self.messages, tools=TOOLS)
+                tool_calls = message.get("tool_calls")
+                content = str(message.get("content") or "")
 
-            if isinstance(tool_calls, list) and tool_calls:
-                assistant_message = self._assistant_message(message)
-                self.messages.append(assistant_message)
-                for index, tool_call in enumerate(assistant_message.get("tool_calls") or []):
-                    action, error = self._action_from_tool_call(tool_call, index)
-                    if action is not None:
-                        actions.append(action)
-                        self._append_tool_result(tool_call, "pending_approval", "Cambio propuesto; espera la aprobación del usuario.")
-                    else:
-                        errors.append(error)
-                        self._append_tool_result(tool_call, "error", error)
+                if isinstance(tool_calls, list) and tool_calls:
+                    assistant_message = self._assistant_message(message)
+                    self.messages.append(assistant_message)
+                    for index, tool_call in enumerate(assistant_message.get("tool_calls") or []):
+                        action, error = self._action_from_tool_call(tool_call, index)
+                        if action is not None:
+                            actions.append(action)
+                            self._append_tool_result(
+                                tool_call,
+                                "pending_approval",
+                                "Cambio propuesto; espera la aprobación del usuario.",
+                            )
+                        else:
+                            errors.append(error)
+                            self._append_tool_result(tool_call, "error", error)
+                    final_text = content.strip()
+                    continue
+
+                self.messages.append({"role": "assistant", "content": content})
                 final_text = content.strip()
-                continue
-
-            self.messages.append({"role": "assistant", "content": content})
-            final_text = content.strip()
-            fallback_actions, fallback_errors, cleaned = self._extract_fallback(content)
-            actions.extend(fallback_actions)
-            errors.extend(fallback_errors)
-            final_text = cleaned.strip() or final_text
-            break
+                fallback_actions, fallback_errors, cleaned = self._extract_fallback(content)
+                actions.extend(fallback_actions)
+                errors.extend(fallback_errors)
+                final_text = cleaned.strip() or final_text
+                break
+            else:
+                errors.append(
+                    "Se alcanzó el límite de pasos del asistente. "
+                    "La propuesta puede estar incompleta; reformula la petición."
+                )
+        finally:
+            self.messages[user_index]["content"] = text
 
         self._trim_history()
         if not final_text:
@@ -190,6 +203,23 @@ class Agent:
                 )
             cleaned = cleaned.replace(match.group(0), "").strip()
         return actions, errors, cleaned
+
+    def resolve_pending(self, accepted: bool, detail: str = "") -> None:
+        """Tell the model whether the proposed actions were kept or rejected."""
+        status = "accepted" if accepted else "rejected"
+        for message in self.messages:
+            if message.get("role") != "tool":
+                continue
+            try:
+                data = json.loads(str(message.get("content") or ""))
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(data, dict) or data.get("status") != "pending_approval":
+                continue
+            data["status"] = status
+            if detail:
+                data["message"] = detail
+            message["content"] = json.dumps(data, ensure_ascii=False)
 
     def _trim_history(self) -> None:
         if len(self.messages) <= MAX_CONVERSATION_MESSAGES:

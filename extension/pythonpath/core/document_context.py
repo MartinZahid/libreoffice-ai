@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
+from urllib.parse import urlparse
+
+from .adapters.common import document_kind, selection_text
 
 MAX_SELECTION_CHARS = 4000
 MAX_PARAGRAPH_CHARS = 2000
@@ -10,47 +14,40 @@ MAX_CELL_ROWS = 8
 MAX_CELL_COLUMNS = 8
 MAX_SLIDE_SHAPES = 20
 
+DOCUMENT_NAMES = {
+    "writer": "Writer",
+    "calc": "Calc",
+    "impress": "Impress",
+    "draw": "Draw",
+}
 
-def _supports(doc: Any, service: str) -> bool:
-    try:
-        return bool(doc.supportsService(service))
-    except Exception:
-        return False
 
-
-def _doc_type(doc: Any) -> str:
-    if _supports(doc, "com.sun.star.text.TextDocument"):
-        return "Writer"
-    if _supports(doc, "com.sun.star.sheet.SpreadsheetDocument"):
-        return "Calc"
-    if _supports(doc, "com.sun.star.presentation.PresentationDocument"):
-        return "Impress"
-    if _supports(doc, "com.sun.star.drawing.DrawingDocument"):
-        return "Draw"
-    return "Documento"
+def _safe_name(value: str) -> str:
+    name = os.path.basename(value.replace("\\", "/").rstrip("/"))
+    return name or "Sin título"
 
 
 def _title(doc: Any) -> str:
     try:
-        title = doc.getTitle()
+        title = str(doc.getTitle() or "").strip()
         if title:
-            return str(title)
+            return _safe_name(title)
     except Exception:
         pass
     try:
-        return str(doc.getURL() or "Sin título")
+        url = str(doc.getURL() or "")
+        if url:
+            return _safe_name(urlparse(url).path)
     except Exception:
-        return "Sin título"
+        pass
+    return "Sin título"
 
 
 def _writer_context(doc: Any) -> list[str]:
     parts = []
     try:
         controller = doc.getCurrentController()
-        selection = controller.getSelection()
-        selected = ""
-        if selection is not None and hasattr(selection, "getString"):
-            selected = str(selection.getString() or "")
+        selected = selection_text(controller.getSelection())
         if selected:
             parts.append("Texto seleccionado:\n" + selected[:MAX_SELECTION_CHARS])
 
@@ -132,13 +129,14 @@ def build_document_context(doc: Any, max_chars: int = 12000) -> str:
     """Return a short context block that is safe to send to the model."""
     if doc is None:
         return "No hay un documento abierto."
-    doc_type = _doc_type(doc)
+    kind = document_kind(doc)
+    doc_type = DOCUMENT_NAMES.get(kind, "Documento")
     parts = [f"Tipo de documento: {doc_type}", f"Título: {_title(doc)}"]
-    if doc_type == "Writer":
+    if kind == "writer":
         parts.extend(_writer_context(doc))
-    elif doc_type == "Calc":
+    elif kind == "calc":
         parts.extend(_calc_context(doc))
-    elif doc_type in ("Impress", "Draw"):
+    elif kind in ("impress", "draw"):
         parts.extend(_impress_context(doc))
     context = "\n\n".join(parts)
     if len(context) > max_chars:

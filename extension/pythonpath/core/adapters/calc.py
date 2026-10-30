@@ -1,4 +1,4 @@
-"""Calc actions implemented with the LibreOffice UNO API."""
+﻿"""Calc actions implemented with the LibreOffice UNO API."""
 
 from __future__ import annotations
 
@@ -6,7 +6,10 @@ from typing import Any
 
 import uno
 
+from ..formula import validate_formula
 from .common import (
+    as_int,
+    bounded_float,
     cm_to_100mm,
     coerce_bool,
     parse_cell,
@@ -50,6 +53,7 @@ class CalcAdapter:
             cell.setValue(float(value))
         else:
             text = str(value)
+            validate_formula(text)
             if text.startswith("="):
                 cell.setFormula(text)
             else:
@@ -58,11 +62,15 @@ class CalcAdapter:
     def _write_values(self, sheet: Any, start_cell: str, values: Any) -> tuple[int, int, int, int]:
         if not isinstance(values, list) or not values:
             raise ValueError("values debe ser una matriz con al menos una fila.")
+        for row in values:
+            if not isinstance(row, list):
+                raise ValueError("Cada fila de values debe ser una lista.")
+            for value in row:
+                if isinstance(value, str):
+                    validate_formula(value)
         start_column, start_row = parse_cell(start_cell)
         max_columns = 0
         for row_index, row in enumerate(values):
-            if not isinstance(row, list):
-                raise ValueError("Cada fila de values debe ser una lista.")
             max_columns = max(max_columns, len(row))
             for column_index, value in enumerate(row):
                 self._set_cell(
@@ -96,15 +104,15 @@ class CalcAdapter:
 
     def calc_insert_rows(self, args: dict[str, Any]) -> None:
         sheet = self._sheet(args.get("sheet"))
-        count = max(1, min(int(args.get("count", 1)), 1000))
-        index = max(1, int(args.get("index", 1)))
+        count = max(1, min(as_int(args.get("count"), 1), 1000))
+        index = max(1, as_int(args.get("index"), 1))
         index = min(index, sheet.Rows.getCount() + 1)
         sheet.Rows.insertByIndex(index - 1, count)
 
     def calc_insert_columns(self, args: dict[str, Any]) -> None:
         sheet = self._sheet(args.get("sheet"))
-        count = max(1, min(int(args.get("count", 1)), 100))
-        index = max(1, int(args.get("index", 1)))
+        count = max(1, min(as_int(args.get("count"), 1), 100))
+        index = max(1, as_int(args.get("index"), 1))
         index = min(index, sheet.Columns.getCount() + 1)
         sheet.Columns.insertByIndex(index - 1, count)
 
@@ -131,7 +139,8 @@ class CalcAdapter:
         if args.get("italic") is not None:
             set_optional(target, "CharPosture", ITALIC if coerce_bool(args["italic"]) else SLANT_NONE)
         if args.get("font_size") is not None:
-            set_optional(target, "CharHeight", float(args["font_size"]))
+            size = bounded_float(args["font_size"], 12.0, 4.0, 200.0, "El tamaño de fuente")
+            set_optional(target, "CharHeight", size)
         color = parse_color(args.get("font_color"))
         if color is not None:
             set_optional(target, "CharColor", color)
@@ -165,7 +174,7 @@ class CalcAdapter:
         end = parse_cell(last + "1")[0]
         if end < start:
             start, end = end, start
-        width = cm_to_100mm(args.get("width_cm"))
+        width = cm_to_100mm(bounded_float(args.get("width_cm"), 0, 0.1, 100, "El ancho"))
         if width <= 0:
             raise ValueError("El ancho debe ser mayor que cero.")
         for index in range(start, end + 1):
@@ -176,7 +185,7 @@ class CalcAdapter:
         start, end = parse_range(str(args.get("range", "")))
         target = sheet.getCellRangeByName(f"{start}:{end}")
         field = uno.createUnoStruct("com.sun.star.table.TableSortField")
-        field.Field = max(0, int(args.get("column", 1)) - 1)
+        field.Field = max(0, as_int(args.get("column"), 1) - 1)
         field.IsAscending = coerce_bool(args.get("ascending"), True)
         field.IsCaseSensitive = False
         properties = []
@@ -195,6 +204,8 @@ class CalcAdapter:
         name = str(args.get("name", "")).strip()
         if not name:
             raise ValueError("El nombre de la hoja no puede estar vacío.")
+        if len(name) > 31 or any(character in name for character in "[]:*?/\\"):
+            raise ValueError("El nombre de la hoja no es válido (máximo 31 caracteres sin []:*?/\\).")
         if self.doc.Sheets.hasByName(name):
             raise ValueError(f"Ya existe una hoja llamada {name}.")
         self.doc.Sheets.insertNewByName(name, self.doc.Sheets.getCount())

@@ -2,8 +2,8 @@
 
 Extensión `.oxt` que añade un chat con IA a LibreOffice Writer, Calc e Impress.
 Puedes pedir en español que escriba, corrija, formatee, inserte tablas, listas,
-imágenes, índices y diapositivas. Los cambios se muestran antes de aplicarse y
-se agrupan en un solo paso de deshacer.
+imágenes, índices y diapositivas. Los cambios se aplican como una vista previa
+agrupada y tú decides si los mantienes o los deshaces.
 
 ## Requisitos
 
@@ -42,12 +42,13 @@ Abre **Asistente IA > Ajustes...** y configura:
 
 | Campo | Valor recomendado |
 | --- | --- |
-| URL base | `https://opencode.ai/zen/go/v1` |
+| URL base | `https://opencode.ai/inference/go/openai/v1` |
 | Modelo | `deepseek-v4.1-flash` |
 | Clave de API | Tu clave de OpenCode |
 
 La URL base debe ser la raíz compatible con OpenAI. Si pegas una URL que termina
-en `/chat/completions`, se recorta automáticamente.
+en `/chat/completions`, se recorta automáticamente. Por seguridad se exige
+`https://`; solo `localhost`, `127.0.0.1` e `::1` pueden usar `http://`.
 
 La clave se guarda en el perfil local de LibreOffice:
 
@@ -56,8 +57,8 @@ La clave se guarda en el perfil local de LibreOffice:
 ```
 
 También puedes usar la variable de entorno `OPENCODE_API_KEY` si prefieres no
-guardarla en el archivo. La clave nunca se escribe en el registro ni se envía a
-ningún sitio que no sea el proveedor configurado.
+guardarla en el archivo. Al guardar ajustes se crea una copia
+`config.json.bak` con la configuración anterior.
 
 ## Uso
 
@@ -74,12 +75,14 @@ ningún sitio que no sea el proveedor configurado.
 5. Pulsa **Aceptar** para mantenerlos o **Rechazar** para deshacerlos todos de
    una vez. La vista previa también se revierte al cerrar el chat, iniciar otro
    chat o enviar una petición nueva sin aceptar.
-6. También puedes usar **Ctrl+Z** mientras la vista previa está activa.
+6. Si ya hiciste otros cambios después de la vista previa, **Rechazar** no
+   deshace nada: la extensión comprueba que el grupo de la IA siga siendo el
+   último paso del historial.
 
-El chat mantiene el contexto de la conversación. **Nuevo chat** borra el historial
-y las propuestas pendientes (revirtiendo antes la vista previa). **Detener**
-cancela la espera de la petición actual (la petición de red ya enviada puede
-terminar en segundo plano).
+El chat mantiene el contexto de la conversación. **Nuevo chat** borra el
+historial y las propuestas pendientes (revirtiendo antes la vista previa).
+**Detener** cancela la espera de la petición actual; la petición de red ya
+enviada puede terminar en segundo plano.
 
 ## Acciones disponibles
 
@@ -117,13 +120,28 @@ terminar en segundo plano).
 ## Seguridad y privacidad
 
 - La extensión solo envía al proveedor el texto de tu petición y un resumen del
-  contexto del documento (tipo, título, selección o párrafo actual, vista previa
-  de celdas o textos de la diapositiva). No envía el documento completo.
+  contexto del documento (tipo, título sin ruta local, selección o párrafo
+  actual, vista previa de celdas o textos de la diapositiva). No envía el
+  documento completo.
 - El contexto se puede desactivar con la casilla **Incluir contexto del documento**.
+  Tampoco se acumula en el historial: cada petición usa solo el contexto actual.
+- La URL base debe usar HTTPS. Así la clave y el contenido viajan cifrados.
+- La extensión no sigue redirecciones HTTP hacia otro servidor, para no reenviar
+  la clave a un destino distinto.
 - La clave de API se guarda en texto plano en tu perfil local. Protégela como
   cualquier otro archivo de configuración.
+- Cada conversación envía un identificador de sesión (`x-opencode-session`) para
+  que el proveedor pueda enrutar la conversación.
 - No se registran claves ni se incluyen en los mensajes de error.
-- Las acciones se validan antes de ejecutarse y requieren confirmación por defecto.
+- Las fórmulas que pueden acceder a recursos externos (`WEBSERVICE`,
+  `HYPERLINK`, `DDE`, `IMPORTXML`, `IMPORTHTML`, `IMPORTDATA`, `IMPORTFEED`,
+  `RTD`) se bloquean antes de escribir en la hoja y se muestran en la vista
+  previa.
+- Las imágenes deben ser archivos locales existentes, con formato de imagen
+  conocido y menos de 20 MB. Se rechazan rutas UNC y URL.
+- La vista previa se ejecuta antes de que pulses Aceptar. Esto es intencionado:
+  puedes ver el resultado real en el documento. Rechazar deshace el grupo; si
+  algo falla, la extensión intenta revertir y avisa si no pudo hacerlo.
 
 ## Desarrollo
 
@@ -145,6 +163,7 @@ Comprobaciones:
 
 ```powershell
 python -m unittest discover -s tests -v
+python -m compileall -q extension\pythonpath
 ```
 
 Para probar la extensión en un perfil temporal de LibreOffice:
@@ -155,7 +174,7 @@ Para probar la extensión en un perfil temporal de LibreOffice:
 
 ## Solución de problemas
 
-- **No aparece el menú**: reinicia LibreOffice y comprueba que la extensión está
+- **No aparece el menú**: reinicia LibreOffice y comprueba que la extensión esté
   activa en **Herramientas > Extensiones**.
 - **Falta la clave de API**: abre Ajustes y pégala, o define `OPENCODE_API_KEY`
   antes de iniciar LibreOffice.
@@ -165,8 +184,10 @@ Para probar la extensión en un perfil temporal de LibreOffice:
 - **Error 429**: espera un momento; se alcanzó el límite de peticiones.
 - **No hay documento activo**: abre un documento Writer, Calc o Impress antes de
   enviar la petición.
+- **No se puede rechazar**: probablemente hiciste cambios después de la vista
+  previa. Deshaz manualmente o acepta la vista previa.
 - **Un cambio no se aplica**: revisa el mensaje de error del chat. La ejecución
-  se cancela y se deshace el grupo completo si una acción falla.
+  se cancela y se intenta deshacer el grupo completo si una acción falla.
 
 ## Limitaciones conocidas
 

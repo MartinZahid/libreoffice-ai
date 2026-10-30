@@ -6,9 +6,14 @@ import json
 import socket
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 from .config import Config
+from .version import USER_AGENT
+
+MAX_RESPONSE_BYTES = 2_000_000
 
 
 class LLMError(RuntimeError):
@@ -19,10 +24,35 @@ class LLMError(RuntimeError):
         self.status = status
 
 
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Allow redirects only within the same origin, never to another host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urlparse(req.full_url)
+        new = urlparse(newurl)
+        same_origin = (
+            old.scheme == new.scheme
+            and (old.hostname or "").lower() == (new.hostname or "").lower()
+            and old.port == new.port
+        )
+        if not same_origin:
+            raise LLMError(
+                "El proveedor intentó redirigir la petición a otro servidor. "
+                "Revisa la URL base en Ajustes."
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open_request(request: urllib.request.Request, timeout: float):
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
+    return opener.open(request, timeout=timeout)
+
+
 class LLMClient:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, session_id: str | None = None):
         self.config = config
         self.base_url = config.base_url.rstrip("/")
+        self.session_id = session_id or "ses_" + uuid.uuid4().hex
 
     def chat(
         self,
@@ -43,7 +73,7 @@ class LLMClient:
 
         data = self._request("POST", "/chat/completions", payload)
         choices = data.get("choices")
-        if not isinstance(choices, list) or not choices:
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise LLMError("El proveedor devolvió una respuesta sin resultados.")
         message = choices[0].get("message")
         if not isinstance(message, dict):
@@ -51,7 +81,7 @@ class LLMClient:
         return message
 
     def list_models(self) -> list[str]:
-        data = self._request("GET", "/models", None)
+        data = self._request("GET", "", None, url=self._models_url())
         entries = data.get("data")
         if not isinstance(entries, list):
             return []
@@ -61,22 +91,36 @@ class LLMClient:
                 models.append(str(entry["id"]))
         return sorted(models)
 
-    def _request(self, method: str, path: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+    def _models_url(self) -> str:
+        if self.base_url.endswith("/openai/v1"):
+            return self.base_url[: -len("/openai/v1")] + "/v1/models"
+        return self.base_url + "/models"
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        url: str | None = None,
+    ) -> dict[str, Any]:
         config = self.config.require_api_key()
-        url = self.base_url + path
+        url = url or self.base_url + path
         body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
             "Accept": "application/json",
             "Authorization": "Bearer " + config.api_key,
-            "User-Agent": "LibreOffice-AI/1.0",
+            "User-Agent": USER_AGENT,
+            "x-opencode-session": self.session_id,
         }
         if body is not None:
             headers["Content-Type"] = "application/json"
 
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=config.timeout) as response:
-                raw = response.read()
+            with _open_request(request, config.timeout) as response:
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise LLMError("La respuesta del proveedor es demasiado grande.")
         except urllib.error.HTTPError as exc:
             detail = self._read_error(exc)
             raise LLMError(self._http_message(exc.code, detail), status=exc.code) from exc
@@ -99,7 +143,7 @@ class LLMClient:
     @staticmethod
     def _read_error(exc: urllib.error.HTTPError) -> str:
         try:
-            raw = exc.read().decode("utf-8", errors="replace")
+            raw = exc.read(MAX_RESPONSE_BYTES + 1).decode("utf-8", errors="replace")
         except Exception:
             return ""
         try:

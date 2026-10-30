@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import uno
 
 from .common import (
+    bounded_float,
     cell_name,
     cm_to_100mm,
     coerce_bool,
     find_style,
+    first_selection_range,
     parse_color,
+    selection_text,
     set_optional,
+    validate_image_path,
 )
 
 
@@ -87,11 +90,9 @@ class WriterAdapter:
     def _selection(self):
         try:
             selection = self.doc.getCurrentController().getSelection()
-            if selection is not None and hasattr(selection, "getString"):
-                return selection
+            return first_selection_range(selection)
         except Exception:
-            pass
-        return None
+            return None
 
     def _target(self, position: str):
         if position == "start":
@@ -101,7 +102,7 @@ class WriterAdapter:
         if position in ("selection", "cursor"):
             selection = self._selection()
             if position == "selection" and selection is not None:
-                return selection, bool(selection.getString())
+                return selection, bool(selection_text(selection))
             return self._view_cursor(), False
         return self._view_cursor(), False
 
@@ -243,7 +244,8 @@ class WriterAdapter:
         if args.get("font_name"):
             set_optional(cursor, "CharFontName", str(args["font_name"]))
         if args.get("font_size") is not None:
-            set_optional(cursor, "CharHeight", float(args["font_size"]))
+            size = bounded_float(args["font_size"], 12.0, 4.0, 200.0, "El tamaño de fuente")
+            set_optional(cursor, "CharHeight", size)
         color = parse_color(args.get("color"))
         if color is not None:
             set_optional(cursor, "CharColor", color)
@@ -255,16 +257,14 @@ class WriterAdapter:
         cursor.BreakType = PAGE_BEFORE
 
     def writer_insert_image(self, args: dict[str, Any]) -> None:
-        path = os.path.abspath(str(args.get("path", "")))
-        if not os.path.isfile(path):
-            raise ValueError(f"No existe la imagen: {path}")
+        path = validate_image_path(args.get("path"))
         graphic = self.doc.createInstance("com.sun.star.text.TextGraphicObject")
         graphic.GraphicURL = uno.systemPathToFileUrl(path)
         set_optional(graphic, "AnchorType", AS_CHARACTER)
         if args.get("width_cm") is not None:
-            graphic.Width = cm_to_100mm(args["width_cm"])
+            graphic.Width = cm_to_100mm(bounded_float(args["width_cm"], 0, 0.1, 100, "El ancho"))
         if args.get("height_cm") is not None:
-            graphic.Height = cm_to_100mm(args["height_cm"])
+            graphic.Height = cm_to_100mm(bounded_float(args["height_cm"], 0, 0.1, 100, "La altura"))
         cursor, replace = self._target(str(args.get("position", "cursor")))
         if replace:
             cursor.setString("")

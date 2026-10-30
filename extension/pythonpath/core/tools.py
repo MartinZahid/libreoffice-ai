@@ -318,8 +318,48 @@ TOOLS: list[dict[str, Any]] = [
 TOOLS_BY_NAME = {tool["function"]["name"]: tool for tool in TOOLS}
 
 
+def _type_matches(value: Any, expected: str) -> bool:
+    if expected == "null":
+        return value is None
+    if expected == "object":
+        return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    return True
+
+
+def _validate_value(name: str, value: Any, schema: dict[str, Any], path: str) -> None:
+    expected = schema.get("type")
+    if expected:
+        allowed = expected if isinstance(expected, list) else [expected]
+        if not any(_type_matches(value, item) for item in allowed):
+            raise ToolError(f"El argumento {path} de {name} tiene un tipo inválido.")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ToolError(f"El argumento {path} de {name} no es un valor permitido.")
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for index, item in enumerate(value):
+            _validate_value(name, item, schema["items"], f"{path}[{index}]")
+    if isinstance(value, dict):
+        properties = schema.get("properties") or {}
+        if schema.get("additionalProperties") is False:
+            extra = sorted(set(value) - set(properties))
+            if extra:
+                raise ToolError(f"El argumento {path} de {name} contiene campos no permitidos: {', '.join(extra)}.")
+        for key, item in value.items():
+            if key in properties and item is not None:
+                _validate_value(name, item, properties[key], f"{path}.{key}")
+
+
 def parse_arguments(name: str, raw_arguments: Any) -> dict[str, Any]:
-    """Parse and minimally validate the JSON arguments of a tool call."""
+    """Parse and validate the JSON arguments of a tool call."""
     if name not in TOOLS_BY_NAME:
         raise ToolError(f"Herramienta desconocida: {name}")
 
@@ -343,4 +383,5 @@ def parse_arguments(name: str, raw_arguments: Any) -> dict[str, Any]:
         if required not in arguments or arguments[required] in (None, ""):
             raise ToolError(f"Falta el argumento obligatorio '{required}' en {name}.")
 
+    _validate_value(name, arguments, schema, "arguments")
     return arguments

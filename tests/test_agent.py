@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -98,6 +99,64 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(result.errors)
         tool_messages = [m for m in client.calls[1] if m.get("role") == "tool"]
         self.assertIn("error", tool_messages[0]["content"])
+
+    def test_document_context_is_not_persisted(self):
+        client = FakeClient([{"content": "Hecho."}])
+        agent = Agent(client)
+        agent.run("Mejora esto", "Documento Writer con datos privados")
+        user_message = next(m for m in agent.messages if m.get("role") == "user")
+        self.assertEqual(user_message["content"], "Mejora esto")
+        self.assertNotIn("datos privados", str(agent.messages))
+
+    def test_resolve_pending_marks_tool_result(self):
+        client = FakeClient(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "writer_insert_text",
+                                "arguments": '{"text": "Hola"}',
+                            },
+                        }
+                    ],
+                },
+                {"content": "Listo."},
+            ]
+        )
+        agent = Agent(client)
+        agent.run("Escribe hola")
+        agent.resolve_pending(False, "El usuario rechazó el cambio.")
+        tool_message = next(m for m in agent.messages if m.get("role") == "tool")
+        payload = json.loads(tool_message["content"])
+        self.assertEqual(payload["status"], "rejected")
+        self.assertIn("rechazó", payload["message"])
+
+    def test_tool_round_limit_is_reported(self):
+        responses = []
+        for index in range(6):
+            responses.append(
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": f"call_{index}",
+                            "type": "function",
+                            "function": {
+                                "name": "calc_add_sheet",
+                                "arguments": json.dumps({"name": f"Hoja{index}"}),
+                            },
+                        }
+                    ],
+                }
+            )
+        client = FakeClient(responses)
+        result = Agent(client).run("Añade hojas")
+        self.assertEqual(len(result.actions), 6)
+        self.assertTrue(any("límite" in error.lower() for error in result.errors))
 
     def test_generates_ids_when_provider_omits_them(self):
         client = FakeClient(

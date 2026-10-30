@@ -6,12 +6,12 @@
   xmlns:d="http://openoffice.org/extensions/description/2006"
   xmlns:l="http://libreoffice.org/extensions/description/2011">
   <identifier value="org.libreofficeai.assistant"/>
-  <version value="1.0.0"/>
+  <version value="1.0.2"/>
   <dependencies>
     <l:LibreOffice-minimal-version d:name="LibreOffice 24.2" value="24.2"/>
   </dependencies>
   <publisher>
-    <name xlink:href="https://opencode.ai">Asistente IA</name>
+    <name xlink:href="https://github.com/MartinZahid/libreoffice-ai">Martin Zahid</name>
   </publisher>
   <display-name>
     <name xml:lang="es">Asistente IA para LibreOffice</name>

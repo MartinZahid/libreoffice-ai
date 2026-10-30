@@ -24,14 +24,32 @@ from core.config import (  # noqa: E402
 class NormalizeBaseUrlTests(unittest.TestCase):
     def test_adds_no_slash_and_accepts_endpoint(self):
         self.assertEqual(
-            normalize_base_url("https://opencode.ai/zen/go/v1/chat/completions"),
-            "https://opencode.ai/zen/go/v1",
+            normalize_base_url(
+                "https://opencode.ai/inference/go/openai/v1/chat/completions"
+            ),
+            "https://opencode.ai/inference/go/openai/v1",
         )
 
     def test_strips_trailing_slash(self):
         self.assertEqual(
-            normalize_base_url("https://opencode.ai/zen/go/v1/"),
-            "https://opencode.ai/zen/go/v1",
+            normalize_base_url("https://opencode.ai/inference/go/openai/v1/"),
+            "https://opencode.ai/inference/go/openai/v1",
+        )
+
+    def test_migrates_legacy_go_url(self):
+        self.assertEqual(
+            normalize_base_url("https://opencode.ai/zen/go/v1"),
+            "https://opencode.ai/inference/go/openai/v1",
+        )
+
+    def test_adds_openai_path_to_inference_base(self):
+        self.assertEqual(
+            normalize_base_url("https://opencode.ai/inference/go"),
+            "https://opencode.ai/inference/go/openai/v1",
+        )
+        self.assertEqual(
+            normalize_base_url("https://opencode.ai/inference"),
+            "https://opencode.ai/inference/openai/v1",
         )
 
     def test_rejects_invalid_url(self):
@@ -40,12 +58,32 @@ class NormalizeBaseUrlTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             normalize_base_url("")
 
+    def test_rejects_plain_http_except_localhost(self):
+        with self.assertRaises(ConfigError):
+            normalize_base_url("http://example.com/v1")
+        self.assertEqual(
+            normalize_base_url("http://localhost:8080/v1"),
+            "http://localhost:8080/v1",
+        )
+        self.assertEqual(
+            normalize_base_url("http://127.0.0.1:8080/v1"),
+            "http://127.0.0.1:8080/v1",
+        )
+
+    def test_rejects_credentials_and_query(self):
+        with self.assertRaises(ConfigError):
+            normalize_base_url("https://user:pass@example.com/v1")
+        with self.assertRaises(ConfigError):
+            normalize_base_url("https://example.com/v1?x=1")
+
 
 class ConfigTests(unittest.TestCase):
     def test_defaults_are_valid(self):
         config = Config().validate()
         self.assertEqual(config.model, "deepseek-v4.1-flash")
-        self.assertEqual(config.base_url, "https://opencode.ai/zen/go/v1")
+        self.assertEqual(
+            config.base_url, "https://opencode.ai/inference/go/openai/v1"
+        )
 
     def test_validate_rejects_bad_values(self):
         with self.assertRaises(ConfigError):
@@ -93,6 +131,50 @@ class ConfigTests(unittest.TestCase):
                 loaded = load_config()
                 self.assertEqual(loaded.base_url, Config().base_url)
                 self.assertEqual(loaded.api_key, "")
+
+    def test_invalid_field_preserves_api_key_and_valid_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"APPDATA": directory}, clear=True):
+                path = Path(directory) / "LibreOffice" / "4" / "user" / "LibreOfficeAI"
+                path.mkdir(parents=True)
+                payload = {
+                    "api_key": "keep-me",
+                    "base_url": "http://example.com/v1",
+                    "model": "custom-model",
+                    "timeout": "not-a-number",
+                    "max_tokens": 2048,
+                }
+                (path / "config.json").write_text(
+                    json.dumps(payload), encoding="utf-8"
+                )
+                loaded = load_config()
+                self.assertEqual(loaded.api_key, "keep-me")
+                self.assertEqual(loaded.model, "custom-model")
+                self.assertEqual(loaded.timeout, 120)
+                self.assertEqual(loaded.max_tokens, 2048)
+                self.assertEqual(loaded.base_url, Config().base_url)
+
+    def test_invalid_api_key_characters_are_dropped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"APPDATA": directory}, clear=True):
+                path = Path(directory) / "LibreOffice" / "4" / "user" / "LibreOfficeAI"
+                path.mkdir(parents=True)
+                (path / "config.json").write_text(
+                    json.dumps({"api_key": "bad\nkey", "model": "custom-model"}),
+                    encoding="utf-8",
+                )
+                loaded = load_config()
+                self.assertEqual(loaded.api_key, "badkey")
+                self.assertEqual(loaded.model, "custom-model")
+
+    def test_save_creates_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"APPDATA": directory}, clear=True):
+                save_config(Config(api_key="first"))
+                save_config(Config(api_key="second"))
+                path = Path(directory) / "LibreOffice" / "4" / "user" / "LibreOfficeAI"
+                backup = json.loads((path / "config.json.bak").read_text(encoding="utf-8"))
+                self.assertEqual(backup["api_key"], "first")
 
 
 if __name__ == "__main__":

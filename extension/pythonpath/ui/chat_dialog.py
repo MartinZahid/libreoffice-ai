@@ -1,8 +1,9 @@
-"""Native LibreOffice chat and settings dialogs."""
+﻿"""Native LibreOffice chat and settings dialogs."""
 
 from __future__ import annotations
 
 import threading
+from collections import deque
 from typing import Any
 
 import unohelper
@@ -263,23 +264,12 @@ class _WindowListener(unohelper.Base, XTopWindowListener):
 
 
 class _ActionListener(unohelper.Base, XActionListener):
-    def __init__(self, handler: Any, command: str = ""):
+    def __init__(self, handler: Any, command: str):
         self._handler = handler
         self._command = command
 
     def actionPerformed(self, event: Any) -> None:
-        command = self._command
-        if not command:
-            try:
-                command = str(event.ActionCommand or "")
-            except Exception:
-                command = ""
-        if not command:
-            try:
-                command = str(event.Source.getModel().Name or "")
-            except Exception:
-                command = ""
-        self._handler(command)
+        self._handler(self._command)
 
 
 class ChatDialog:
@@ -293,10 +283,11 @@ class ChatDialog:
         self._generation = 0
         self._stop_event: threading.Event | None = None
         self._lock = threading.Lock()
-        self._event: tuple[int, str, Any] | None = None
+        self._events: deque[tuple[int, str, Any]] = deque()
         self._pending: list[dict[str, Any]] = []
         self._applied = False
         self._history = ""
+        self._session_id: str | None = None
         self._agent: Agent | None = None
         self._config = load_config(ctx)
         self._controls: dict[str, Any] = {}
@@ -541,7 +532,8 @@ class ChatDialog:
         self._set_running(True)
         self._set_status("Consultando al modelo...")
 
-        client = LLMClient(config)
+        client = LLMClient(config, self._session_id)
+        self._session_id = client.session_id
         if self._agent is None:
             self._agent = Agent(client)
         else:
@@ -572,27 +564,27 @@ class ChatDialog:
         if self._closed:
             return
         with self._lock:
-            self._event = (token, kind, payload)
+            self._events.append((token, kind, payload))
         try:
             self._async.addCallback(self._callback, "ui")
         except Exception:
             pass
 
     def _on_async(self, data: Any) -> None:
-        with self._lock:
-            event = self._event
-            self._event = None
-        if event is None or self._closed:
-            return
-        token, kind, payload = event
-        if token != self._generation:
-            return
-        if kind == "done":
-            self._handle_done(payload)
-        elif kind == "error":
-            self._handle_error(str(payload))
-        elif kind == "stopped":
-            self._handle_stopped()
+        while not self._closed:
+            with self._lock:
+                if not self._events:
+                    return
+                event = self._events.popleft()
+            token, kind, payload = event
+            if token != self._generation:
+                continue
+            if kind == "done":
+                self._handle_done(payload)
+            elif kind == "error":
+                self._handle_error(str(payload))
+            elif kind == "stopped":
+                self._handle_stopped()
 
     def _handle_done(self, result: Any) -> None:
         self._set_running(False)
@@ -632,10 +624,12 @@ class ChatDialog:
             return
         document = self._document()
         try:
-            descriptions = Executor(self.ctx).apply(document, self._pending)
+            descriptions = Executor().apply(document, self._pending)
         except Exception as exc:
             self._pending = []
             self._applied = False
+            if self._agent is not None:
+                self._agent.resolve_pending(False, "No se pudieron aplicar los cambios.")
             self._render_pending()
             self._set_status("No se pudieron aplicar los cambios.")
             self._append_history("Error al aplicar", str(exc))
@@ -654,6 +648,8 @@ class ChatDialog:
         if not self._pending or self._running:
             return
         count = len(self._pending)
+        if self._agent is not None:
+            self._agent.resolve_pending(True)
         self._pending = []
         self._applied = False
         self._render_pending()
@@ -674,6 +670,8 @@ class ChatDialog:
                     _message(self.ctx, self._dialog, "Asistente IA", str(exc), error=True)
                 return
             self._append_history("Cambios rechazados", f"Se deshicieron {count} cambio(s).")
+        if self._agent is not None:
+            self._agent.resolve_pending(False)
         self._pending = []
         self._applied = False
         self._render_pending()
@@ -688,9 +686,15 @@ class ChatDialog:
             self._generation += 1
             if self._stop_event is not None:
                 self._stop_event.set()
-        self._agent = None
+        with self._lock:
+            self._events.clear()
         if self._pending:
             self._reject_pending(silent=True)
+            if self._pending:
+                self._set_status("No se pudo rechazar la vista previa. Revisa el documento.")
+                return
+        self._agent = None
+        self._session_id = None
         self._pending = []
         self._applied = False
         self._history = ""
@@ -703,9 +707,3 @@ class ChatDialog:
             self._controls["input"].setFocus()
         except Exception:
             pass
-
-
-def show_chat(ctx: Any, frame: Any) -> ChatDialog:
-    dialog = ChatDialog(ctx, frame)
-    dialog.show()
-    return dialog
