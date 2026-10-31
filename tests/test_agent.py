@@ -17,12 +17,36 @@ class FakeClient:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
+        self.tools = []
 
     def chat(self, messages, tools=None, tool_choice="auto"):
         self.calls.append(copy.deepcopy(messages))
+        self.tools.append(copy.deepcopy(tools))
         if not self.responses:
             raise AssertionError("Unexpected extra LLM call")
         return self.responses.pop(0)
+
+
+class FakeQueryRunner:
+    enable_local_files = True
+    enable_web_search = True
+
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.calls = []
+
+    def enabled_names(self):
+        return ["list_local_images", "search_web"]
+
+    def allows(self, name):
+        return name in self.enabled_names()
+
+    def run(self, name, arguments):
+        self.calls.append((name, arguments))
+        if self.error:
+            raise self.error
+        return self.result
 
 
 class AgentTests(unittest.TestCase):
@@ -54,6 +78,63 @@ class AgentTests(unittest.TestCase):
         tool_messages = [m for m in client.calls[1] if m.get("role") == "tool"]
         self.assertEqual(len(tool_messages), 1)
         self.assertEqual(tool_messages[0]["tool_call_id"], "call_1")
+
+    def test_query_tool_runs_immediately_and_is_not_an_action(self):
+        client = FakeClient(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_query",
+                            "type": "function",
+                            "function": {
+                                "name": "list_local_images",
+                                "arguments": '{"path": "C:\\\\Pictures\\\\Mac"}',
+                            },
+                        }
+                    ],
+                },
+                {"content": "Encontr? una imagen."},
+            ]
+        )
+        runner = FakeQueryRunner({"folder": "C:\\Pictures\\Mac", "images": [{"path": "C:\\Pictures\\Mac\\a.png"}]})
+        result = Agent(client, runner).run("revisa la carpeta")
+        self.assertEqual(result.actions, [])
+        self.assertEqual(runner.calls[0][0], "list_local_images")
+        tool_message = next(m for m in client.calls[1] if m.get("role") == "tool")
+        payload = json.loads(tool_message["content"])
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["result"]["folder"], "C:\\Pictures\\Mac")
+        names = [tool["function"]["name"] for tool in client.tools[0]]
+        self.assertIn("list_local_images", names)
+        self.assertIn("search_web", names)
+
+    def test_query_tool_error_is_reported(self):
+        client = FakeClient(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_query",
+                            "type": "function",
+                            "function": {
+                                "name": "search_web",
+                                "arguments": '{"query": "x"}',
+                            },
+                        }
+                    ],
+                },
+                {"content": "No pude buscar."},
+            ]
+        )
+        runner = FakeQueryRunner(error=ValueError("sin red"))
+        result = Agent(client, runner).run("busca")
+        self.assertEqual(result.actions, [])
+        self.assertTrue(any("sin red" in error for error in result.errors))
+        tool_message = next(m for m in client.calls[1] if m.get("role") == "tool")
+        self.assertEqual(json.loads(tool_message["content"])["status"], "error")
 
     def test_fallback_json_block_is_parsed(self):
         content = (

@@ -8,7 +8,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extension" / "pythonpath"))
 
-from core.tools import TOOLS, TOOLS_BY_NAME, ToolError, parse_arguments  # noqa: E402
+from core.tools import (  # noqa: E402
+    ALL_TOOLS_BY_NAME,
+    QUERY_TOOL_NAMES,
+    QUERY_TOOLS,
+    TOOLS,
+    TOOLS_BY_NAME,
+    ToolError,
+    parse_arguments,
+)
 
 
 class ToolTests(unittest.TestCase):
@@ -16,6 +24,22 @@ class ToolTests(unittest.TestCase):
         names = [tool["function"]["name"] for tool in TOOLS]
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(set(names), set(TOOLS_BY_NAME))
+
+    def test_query_tool_names_are_unique(self):
+        names = [tool["function"]["name"] for tool in QUERY_TOOLS]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(set(names), set(QUERY_TOOL_NAMES))
+        self.assertFalse(set(names) & set(TOOLS_BY_NAME))
+
+    def test_parses_query_arguments_with_catalog(self):
+        arguments = parse_arguments(
+            "search_web",
+            '{"query": "noticias", "max_results": 3}',
+            catalog=ALL_TOOLS_BY_NAME,
+        )
+        self.assertEqual(arguments["query"], "noticias")
+        with self.assertRaises(ToolError):
+            parse_arguments("search_web", {"query": "x"})
 
     def test_parses_json_string(self):
         arguments = parse_arguments("writer_insert_text", '{"text": "Hola"}')

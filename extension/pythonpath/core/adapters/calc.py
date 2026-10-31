@@ -1,13 +1,20 @@
-﻿"""Calc actions implemented with the LibreOffice UNO API."""
+"""Calc actions implemented with the LibreOffice UNO API."""
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import uno
 
 from ..formula import validate_formula
 from .common import (
+    BOLD,
+    BORDER_COLOR,
+    HEADER_BACKGROUND,
+    ITALIC,
+    NORMAL,
+    SLANT_NONE,
     as_int,
     bounded_float,
     cm_to_100mm,
@@ -18,9 +25,7 @@ from .common import (
     set_optional,
 )
 
-BOLD = 150.0
-ITALIC = 2
-SLANT_NONE = 0
+_LOG = logging.getLogger(__name__)
 ALIGN = {"left": 1, "center": 2, "right": 3, "justify": 4}
 
 
@@ -86,7 +91,7 @@ class CalcAdapter:
             start_column, start_row, start_column + columns - 1, start_row
         )
         set_optional(header, "CharWeight", BOLD)
-        set_optional(header, "CellBackColor", 0xE8EEF7)
+        set_optional(header, "CellBackColor", HEADER_BACKGROUND)
         for column in range(start_column, start_column + columns):
             set_optional(sheet.Columns.getByIndex(column), "OptimalWidth", True)
 
@@ -120,7 +125,8 @@ class CalcAdapter:
         formats = self.doc.getNumberFormats()
         try:
             locale = target.CharLocale if target is not None else None
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("No se pudo obtener la configuración regional: %s", exc)
             locale = None
         if locale is None:
             locale = uno.createUnoStruct("com.sun.star.lang.Locale")
@@ -135,7 +141,7 @@ class CalcAdapter:
         target = sheet.getCellRangeByName(f"{start}:{end}")
 
         if args.get("bold") is not None:
-            set_optional(target, "CharWeight", BOLD if coerce_bool(args["bold"]) else 100.0)
+            set_optional(target, "CharWeight", BOLD if coerce_bool(args["bold"]) else NORMAL)
         if args.get("italic") is not None:
             set_optional(target, "CharPosture", ITALIC if coerce_bool(args["italic"]) else SLANT_NONE)
         if args.get("font_size") is not None:
@@ -150,13 +156,16 @@ class CalcAdapter:
         if args.get("align"):
             set_optional(target, "HoriJustify", ALIGN.get(str(args["align"]), 0))
         if args.get("number_format"):
+            key = self._number_format_key(str(args["number_format"]), target)
             try:
-                set_optional(target, "NumberFormat", self._number_format_key(str(args["number_format"]), target))
-            except Exception:
-                pass
+                target.NumberFormat = key
+            except Exception as exc:
+                raise ValueError(
+                    "No se pudo aplicar el formato numérico indicado."
+                ) from exc
         if coerce_bool(args.get("border"), False):
             border = uno.createUnoStruct("com.sun.star.table.BorderLine2")
-            border.Color = 0x808080
+            border.Color = BORDER_COLOR
             border.LineStyle = uno.getConstantByName("com.sun.star.table.BorderLineStyle.SOLID")
             border.LineWidth = 10
             border.OuterLineWidth = 10

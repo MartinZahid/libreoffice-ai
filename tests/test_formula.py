@@ -36,6 +36,30 @@ class FormulaTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_formula("=webservice(\"https://example.com\")")
 
+    def test_blocks_indirect(self):
+        with self.assertRaises(ValueError):
+            validate_formula("=INDIRECT(A1)")
+
+    def test_blocks_external_references(self):
+        for formula in (
+            "='file:///tmp/libro.xlsx'#$Hoja1.A1",
+            "='file:///tmp/libro.xlsx'#Hoja1.A1",
+            "=SUM('C:\\datos\\libro.xlsx'#$Hoja1.A1:A3)",
+        ):
+            with self.subTest(formula=formula):
+                with self.assertRaises(ValueError):
+                    validate_formula(formula)
+
+    def test_blocks_formulas_without_equals(self):
+        for formula in ("+SUM(A1:A3)", "-A1", "@SUM(A1:A3)"):
+            with self.subTest(formula=formula):
+                with self.assertRaises(ValueError):
+                    validate_formula(formula)
+
+    def test_allows_plain_numbers_with_sign(self):
+        validate_formula("-1")
+        validate_formula("+1")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any
+import logging
+from typing import Any, NamedTuple
 
 import uno
 
 from .common import (
+    BOLD,
+    HEADER_BACKGROUND,
+    ITALIC,
+    NORMAL,
+    SLANT_NONE,
+    UNDERLINE_NONE,
+    UNDERLINE_SINGLE,
     bounded_float,
     cell_name,
     cm_to_100mm,
@@ -19,24 +27,26 @@ from .common import (
     validate_image_path,
 )
 
+_LOG = logging.getLogger(__name__)
+
 
 def _constant(name: str, default: Any = None) -> Any:
     try:
         return uno.getConstantByName(name)
     except Exception:
+        _LOG.debug("No se encontró la constante %s; se usa %r.", name, default)
         return default
 
 
 PARAGRAPH_BREAK = _constant("com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK", 0)
 PAGE_BEFORE = _constant("com.sun.star.style.BreakType.PAGE_BEFORE", 4)
 AS_CHARACTER = _constant("com.sun.star.text.TextContentAnchorType.AS_CHARACTER", 1)
-BOLD = 150.0
-NORMAL = 100.0
-ITALIC = 2
-SLANT_NONE = 0
-UNDERLINE_SINGLE = 1
-UNDERLINE_NONE = 0
 ALIGN = {"left": 0, "right": 1, "justify": 2, "center": 3}
+
+
+class Target(NamedTuple):
+    cursor: Any
+    replace: bool
 
 
 STYLE_CANDIDATES = {
@@ -94,17 +104,21 @@ class WriterAdapter:
         except Exception:
             return None
 
-    def _target(self, position: str):
+    def _target(self, position: str) -> Target:
         if position == "start":
-            return self._text_cursor("start"), False
+            return Target(self._text_cursor("start"), False)
         if position == "end":
-            return self._text_cursor("end"), False
+            return Target(self._text_cursor("end"), False)
         if position in ("selection", "cursor"):
             selection = self._selection()
             if position == "selection" and selection is not None:
-                return selection, bool(selection_text(selection))
-            return self._view_cursor(), False
-        return self._view_cursor(), False
+                return Target(selection, bool(selection_text(selection)))
+            return Target(self._view_cursor(), False)
+        return Target(self._view_cursor(), False)
+
+    @staticmethod
+    def _clear(cursor: Any) -> None:
+        cursor.setString("")
 
     def _style_paragraph(self, cursor: Any, style: str) -> None:
         if style not in STYLE_CANDIDATES:
@@ -126,9 +140,10 @@ class WriterAdapter:
         text = str(args.get("text", ""))
         if not text:
             raise ValueError("El texto no puede estar vacío.")
-        cursor, replace = self._target(str(args.get("position", "cursor")))
-        if replace:
-            cursor.setString("")
+        target = self._target(str(args.get("position", "cursor")))
+        cursor = target.cursor
+        if target.replace:
+            self._clear(cursor)
         if coerce_bool(args.get("new_paragraph"), False):
             cursor.getText().insertControlCharacter(cursor, PARAGRAPH_BREAK, False)
         self._insert_text_parts(cursor, text, str(args.get("style", "body")))
@@ -139,7 +154,7 @@ class WriterAdapter:
             raise ValueError("El texto no puede estar vacío.")
         selection = self._selection()
         cursor = selection if selection is not None else self._view_cursor()
-        cursor.setString("")
+        self._clear(cursor)
         self._insert_text_parts(cursor, text, str(args.get("style", "body")))
 
     def writer_find_replace(self, args: dict[str, Any]) -> None:
@@ -183,9 +198,10 @@ class WriterAdapter:
         if style:
             set_optional(table, "TableStyleName", str(style))
 
-        cursor, replace = self._target(str(args.get("position", "cursor")))
-        if replace:
-            cursor.setString("")
+        target = self._target(str(args.get("position", "cursor")))
+        cursor = target.cursor
+        if target.replace:
+            self._clear(cursor)
         self.doc.getText().insertTextContent(cursor, table, False)
 
         for row_index, row in enumerate(rows):
@@ -193,26 +209,62 @@ class WriterAdapter:
                 cell = table.getCellByName(cell_name(column_index, row_index))
                 cell.setString("" if value is None else str(value))
 
-        if coerce_bool(args.get("header"), False):
+        if coerce_bool(args.get("header"), True):
             for column_index in range(columns):
                 cell = table.getCellByName(cell_name(column_index, 0))
                 set_optional(cell, "CharWeight", BOLD)
-                set_optional(cell, "CellBackColor", 0xE8EEF7)
+                set_optional(cell, "CellBackColor", HEADER_BACKGROUND)
+
+    def _numbering_rules(self, ordered: bool) -> Any:
+        """Build a direct numbering definition so no list style is required."""
+        rules = self.doc.createInstance("com.sun.star.text.NumberingRules")
+        base = list(rules.getByIndex(0))
+        changes = {
+            "NumberingType": uno.Any("short", 4 if ordered else 6),
+            "Prefix": "",
+            "Suffix": "." if ordered else "",
+            "ListFormat": "%1%." if ordered else "•",
+            "StartWith": uno.Any("short", 1),
+        }
+        values = []
+        for source in base:
+            prop = uno.createUnoStruct("com.sun.star.beans.PropertyValue")
+            prop.Name = source.Name
+            prop.Handle = source.Handle
+            prop.State = source.State
+            prop.Value = changes.get(source.Name, source.Value)
+            values.append(prop)
+        rules.replaceByIndex(
+            0, uno.Any("[]com.sun.star.beans.PropertyValue", tuple(values))
+        )
+        return rules
 
     def writer_insert_list(self, args: dict[str, Any]) -> None:
         items = args.get("items")
         if not isinstance(items, list) or not items:
             raise ValueError("La lista necesita al menos un elemento.")
-        cursor, replace = self._target(str(args.get("position", "cursor")))
-        if replace:
-            cursor.setString("")
+        target = self._target(str(args.get("position", "cursor")))
+        cursor = target.cursor
+        if target.replace:
+            self._clear(cursor)
 
-        list_style = find_style(self.doc, "ParagraphStyles", LIST_STYLE_CANDIDATES)
         ordered = coerce_bool(args.get("ordered"), False)
+        try:
+            rules = self._numbering_rules(ordered)
+        except Exception as exc:
+            _LOG.warning("No se pudo crear la numeración directa: %s", exc)
+            rules = None
+
+        list_style = None if rules is not None else find_style(
+            self.doc, "ParagraphStyles", LIST_STYLE_CANDIDATES
+        )
         for index, item in enumerate(items):
             if index > 0:
                 cursor.getText().insertControlCharacter(cursor, PARAGRAPH_BREAK, False)
-            if list_style is not None:
+            if rules is not None:
+                cursor.NumberingRules = rules
+                prefix = ""
+            elif list_style is not None:
                 set_optional(cursor, "ParaStyleName", list_style)
                 prefix = ""
             else:
@@ -253,7 +305,8 @@ class WriterAdapter:
             set_optional(cursor, "ParaAdjust", ALIGN.get(str(args["align"]), 0))
 
     def writer_insert_page_break(self, args: dict[str, Any]) -> None:
-        cursor = self._paragraph_cursor()
+        cursor = self._view_cursor()
+        cursor.getText().insertControlCharacter(cursor, PARAGRAPH_BREAK, False)
         cursor.BreakType = PAGE_BEFORE
 
     def writer_insert_image(self, args: dict[str, Any]) -> None:
@@ -265,9 +318,10 @@ class WriterAdapter:
             graphic.Width = cm_to_100mm(bounded_float(args["width_cm"], 0, 0.1, 100, "El ancho"))
         if args.get("height_cm") is not None:
             graphic.Height = cm_to_100mm(bounded_float(args["height_cm"], 0, 0.1, 100, "La altura"))
-        cursor, replace = self._target(str(args.get("position", "cursor")))
-        if replace:
-            cursor.setString("")
+        target = self._target(str(args.get("position", "cursor")))
+        cursor = target.cursor
+        if target.replace:
+            self._clear(cursor)
         self.doc.getText().insertTextContent(cursor, graphic, False)
 
     def writer_insert_toc(self, args: dict[str, Any]) -> None:
@@ -278,5 +332,5 @@ class WriterAdapter:
         self.doc.getText().insertTextContent(cursor, index, False)
         try:
             self.doc.getDocumentIndexes().update()
-        except Exception:
-            pass
+        except Exception as exc:
+            _LOG.warning("El índice se insertó, pero no se pudo actualizar: %s", exc)

@@ -2,11 +2,29 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from typing import Any
 from urllib.parse import urlparse
 
+
+_LOG = logging.getLogger(__name__)
+
+BOLD = 150.0
+NORMAL = 100.0
+ITALIC = 2
+SLANT_NONE = 0
+UNDERLINE_SINGLE = 1
+UNDERLINE_NONE = 0
+HEADER_BACKGROUND = 0xE8EEF7
+BORDER_COLOR = 0x808080
+BODY_FONT_SIZE = 12.0
+TITLE_FONT_SIZE = 30.0
+IMPRESS_TITLE_BOX = (2000, 900, 22000, 3000)
+IMPRESS_CONTENT_BOX = (2000, 4800, 22000, 13500)
+IMPRESS_TEXT_BOX = (2000, 5000, 22000, 10000)
+IMPRESS_TABLE_BOX = (2000, 5000, 22000, 12000)
 
 CELL_RE = re.compile(r"^\$?([A-Za-z]+)\$?(\d+)$")
 IMAGE_EXTENSIONS = {
@@ -131,10 +149,17 @@ def first_selection_range(selection: Any) -> Any | None:
     return None
 
 
-def cm_to_100mm(value: Any, default: int = 0) -> int:
-    if value is None:
+def cm_to_100mm(
+    value: Any,
+    default: int = 0,
+    minimum: float = 0.0,
+    maximum: float = 100.0,
+    label: str = "La medida",
+) -> int:
+    if value is None or value == "":
         return default
-    return int(round(float(value) * 1000))
+    number = bounded_float(value, 0.0, minimum, maximum, label)
+    return int(round(number * 1000))
 
 
 def coerce_bool(value: Any, default: bool = False) -> bool:
@@ -163,8 +188,8 @@ def set_optional(obj: Any, name: str, value: Any) -> None:
         return
     try:
         setattr(obj, name, value)
-    except Exception:
-        pass
+    except Exception as exc:
+        _LOG.debug("No se pudo asignar %s: %s", name, exc)
 
 
 def column_letters(index: int) -> str:

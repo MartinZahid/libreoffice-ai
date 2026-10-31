@@ -13,8 +13,8 @@ from core.executor import Executor, describe_action  # noqa: E402
 
 
 class FakeUndo:
-    def __init__(self, title="Asistente IA (vista previa)", fail_undo=False):
-        self.title = title
+    def __init__(self, titles=None, fail_undo=False):
+        self.titles = list(titles or [])
         self.fail_undo = fail_undo
         self.entered = []
         self.leaves = 0
@@ -25,16 +25,16 @@ class FakeUndo:
 
     def leaveUndoContext(self):
         self.leaves += 1
+        self.titles.append(Executor.PREVIEW_TITLE)
 
-    def isUndoPossible(self):
-        return bool(self.title)
-
-    def getCurrentUndoActionTitle(self):
-        return self.title
+    def getAllUndoActionTitles(self):
+        return tuple(self.titles)
 
     def undo(self):
         if self.fail_undo:
             raise RuntimeError("undo failed")
+        if self.titles:
+            self.titles.pop()
         self.undos += 1
 
 
@@ -111,16 +111,44 @@ class ExecutorValidationTests(unittest.TestCase):
         self.assertEqual(undo.leaves, 1)
         self.assertEqual(len(descriptions), 2)
 
-    def test_none_arguments_are_normalized(self):
+    def test_apply_records_preview_for_revert(self):
+        undo = FakeUndo()
+        adapter = FakeAdapter()
+        executor = Executor()
+        doc = FakeDoc(undo)
+        with patch("core.executor._adapter_for", return_value=adapter):
+            executor.apply(doc, [{"name": "writer_insert_text", "arguments": {"text": "x"}}])
+        self.assertTrue(executor.can_revert)
+        executor.revert(doc)
+        self.assertEqual(undo.undos, 1)
+        self.assertFalse(executor.can_revert)
+
+    def test_none_arguments_are_not_mutated(self):
         undo = FakeUndo()
         adapter = FakeAdapter()
         action = {"name": "writer_insert_page_break", "arguments": None}
         with patch("core.executor._adapter_for", return_value=adapter):
             Executor().apply(FakeDoc(undo), [action])
-        self.assertEqual(action["arguments"], {})
+        self.assertIsNone(action["arguments"])
         self.assertEqual(adapter.executed, ["writer_insert_page_break"])
 
     def test_failure_rolls_back_the_group(self):
+        undo = FakeUndo()
+        adapter = FakeAdapter(fail_on="writer_format")
+        with patch("core.executor._adapter_for", return_value=adapter):
+            with self.assertRaises(RuntimeError):
+                Executor().apply(
+                    FakeDoc(undo),
+                    [
+                        {"name": "writer_insert_text", "arguments": {"text": "x"}},
+                        {"name": "writer_format", "arguments": {"bold": True}},
+                    ],
+                )
+        self.assertEqual(adapter.executed, ["writer_insert_text"])
+        self.assertEqual(undo.leaves, 1)
+        self.assertEqual(undo.undos, 1)
+
+    def test_no_undo_when_nothing_was_applied(self):
         undo = FakeUndo()
         adapter = FakeAdapter(fail_on="writer_insert_text")
         with patch("core.executor._adapter_for", return_value=adapter):
@@ -130,33 +158,48 @@ class ExecutorValidationTests(unittest.TestCase):
                     [{"name": "writer_insert_text", "arguments": {"text": "x"}}],
                 )
         self.assertEqual(undo.leaves, 1)
-        self.assertEqual(undo.undos, 1)
+        self.assertEqual(undo.undos, 0)
 
     def test_failed_rollback_is_reported(self):
         undo = FakeUndo(fail_undo=True)
-        adapter = FakeAdapter(fail_on="writer_insert_text")
+        adapter = FakeAdapter(fail_on="writer_format")
         with patch("core.executor._adapter_for", return_value=adapter):
             with self.assertRaisesRegex(ValueError, "parcialmente"):
                 Executor().apply(
                     FakeDoc(undo),
-                    [{"name": "writer_insert_text", "arguments": {"text": "x"}}],
+                    [
+                        {"name": "writer_insert_text", "arguments": {"text": "x"}},
+                        {"name": "writer_format", "arguments": {"bold": True}},
+                    ],
                 )
 
-    def test_revert_only_undoes_preview_on_top(self):
-        undo = FakeUndo()
-        Executor.revert(FakeDoc(undo))
-        self.assertEqual(undo.undos, 1)
-
     def test_revert_refuses_to_undo_later_edits(self):
-        undo = FakeUndo(title="Escritura del usuario")
+        undo = FakeUndo()
+        adapter = FakeAdapter()
+        executor = Executor()
+        doc = FakeDoc(undo)
+        with patch("core.executor._adapter_for", return_value=adapter):
+            executor.apply(doc, [{"name": "writer_insert_text", "arguments": {"text": "x"}}])
+        undo.titles.append("Escritura del usuario")
         with self.assertRaises(ValueError):
-            Executor.revert(FakeDoc(undo))
+            executor.revert(doc)
         self.assertEqual(undo.undos, 0)
 
-    def test_revert_requires_undo_history(self):
-        undo = FakeUndo(title="")
+    def test_revert_requires_a_registered_preview(self):
+        undo = FakeUndo()
         with self.assertRaises(ValueError):
-            Executor.revert(FakeDoc(undo))
+            Executor().revert(FakeDoc(undo))
+        self.assertEqual(undo.undos, 0)
+
+    def test_revert_requires_the_same_document(self):
+        undo = FakeUndo()
+        adapter = FakeAdapter()
+        executor = Executor()
+        with patch("core.executor._adapter_for", return_value=adapter):
+            executor.apply(FakeDoc(undo), [{"name": "writer_insert_text", "arguments": {"text": "x"}}])
+        with self.assertRaises(ValueError):
+            executor.revert(FakeDoc(undo))
+        self.assertEqual(undo.undos, 0)
 
     def test_formula_is_shown_in_preview(self):
         text = describe_action(

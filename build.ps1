@@ -13,6 +13,9 @@ $output = Join-Path $dist "LibreOfficeAI.oxt"
 if (-not (Test-Path -LiteralPath (Join-Path $source "description.xml"))) {
     throw "No se encontró extension\description.xml"
 }
+if (-not (Test-Path -LiteralPath (Join-Path $source "META-INF\manifest.xml"))) {
+    throw "No se encontró extension\META-INF\manifest.xml"
+}
 
 if (Test-Path -LiteralPath $stage) {
     Remove-Item -LiteralPath $stage -Recurse -Force
@@ -60,14 +63,45 @@ try {
     $archive.Dispose()
 }
 
+$zip = [System.IO.Compression.ZipFile]::OpenRead($output)
+try {
+    foreach ($required in @("META-INF/manifest.xml", "description.xml")) {
+        if ($null -eq $zip.GetEntry($required)) {
+            throw "El paquete no contiene $required"
+        }
+    }
+} finally {
+    $zip.Dispose()
+}
+
 Remove-Item -LiteralPath $stage -Recurse -Force
 Write-Host "Extensión creada: $output"
 
 if ($Install) {
-    $unopkg = "C:\Program Files\LibreOffice\program\unopkg.com"
-    if (-not (Test-Path -LiteralPath $unopkg)) {
-        throw "No se encontró unopkg.com. Instala la extensión manualmente."
+    $candidates = @(
+        "C:\Program Files\LibreOffice\program\unopkg.com",
+        "C:\Program Files (x86)\LibreOffice\program\unopkg.com",
+        (Join-Path $env:ProgramFiles "LibreOffice\program\unopkg.com")
+    )
+    $unopkg = $null
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            $unopkg = $candidate
+            break
+        }
+    }
+    if (-not $unopkg) {
+        $command = Get-Command "unopkg.com" -ErrorAction SilentlyContinue
+        if ($command) {
+            $unopkg = $command.Source
+        }
+    }
+    if (-not $unopkg) {
+        throw "No se encontró unopkg.com. Instala la extensión manualmente desde el Gestor de extensiones."
     }
     & $unopkg add -f --suppress-license $output
+    if ($LASTEXITCODE -ne 0) {
+        throw "unopkg.com terminó con el código $LASTEXITCODE."
+    }
     Write-Host "Extensión instalada. Reinicia LibreOffice."
 }

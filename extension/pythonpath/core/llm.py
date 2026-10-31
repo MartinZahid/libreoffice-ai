@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import urllib.error
 import urllib.request
@@ -43,9 +44,11 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+_OPENER = urllib.request.build_opener(_SafeRedirectHandler())
+
+
 def _open_request(request: urllib.request.Request, timeout: float):
-    opener = urllib.request.build_opener(_SafeRedirectHandler())
-    return opener.open(request, timeout=timeout)
+    return _OPENER.open(request, timeout=timeout)
 
 
 class LLMClient:
@@ -103,12 +106,14 @@ class LLMClient:
         payload: dict[str, Any] | None,
         url: str | None = None,
     ) -> dict[str, Any]:
-        config = self.config.require_api_key()
+        api_key = (self.config.api_key or os.environ.get("OPENCODE_API_KEY", "")).strip()
+        if not api_key:
+            raise LLMError("Falta la clave de API. Configúrala en Ajustes o con OPENCODE_API_KEY.")
         url = url or self.base_url + path
         body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
             "Accept": "application/json",
-            "Authorization": "Bearer " + config.api_key,
+            "Authorization": "Bearer " + api_key,
             "User-Agent": USER_AGENT,
             "x-opencode-session": self.session_id,
         }
@@ -117,7 +122,7 @@ class LLMClient:
 
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            with _open_request(request, config.timeout) as response:
+            with _open_request(request, self.config.timeout) as response:
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
             if len(raw) > MAX_RESPONSE_BYTES:
                 raise LLMError("La respuesta del proveedor es demasiado grande.")

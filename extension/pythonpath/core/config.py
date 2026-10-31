@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -22,6 +23,8 @@ DEFAULT_TIMEOUT = 120
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_MAX_CONTEXT_CHARS = 12000
+
+_LOG = logging.getLogger(__name__)
 
 _LEGACY_BASE_URLS = {
     "https://opencode.ai/zen/go/v1": "https://opencode.ai/inference/go/openai/v1",
@@ -45,20 +48,22 @@ class Config:
     temperature: float = DEFAULT_TEMPERATURE
     max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS
     confirm_before_apply: bool = True
+    enable_local_files: bool = True
+    enable_web_search: bool = True
 
     def validate(self) -> "Config":
         self.base_url = normalize_base_url(self.base_url)
         self.model = (self.model or "").strip()
-        self.api_key = (self.api_key or "").strip()
+        self.api_key = _clean_secret(self.api_key)
         if not self.model:
             raise ConfigError("El modelo no puede estar vacío.")
-        if any(ord(character) < 32 for character in self.api_key):
-            raise ConfigError("La clave de API contiene caracteres no válidos.")
         self.timeout = int(self.timeout)
         self.max_tokens = int(self.max_tokens)
         self.temperature = float(self.temperature)
         self.max_context_chars = int(self.max_context_chars)
         self.confirm_before_apply = _as_bool(self.confirm_before_apply)
+        self.enable_local_files = _as_bool(self.enable_local_files)
+        self.enable_web_search = _as_bool(self.enable_web_search)
         if not 1 <= self.timeout <= 600:
             raise ConfigError("El tiempo de espera debe estar entre 1 y 600 segundos.")
         if not 64 <= self.max_tokens <= 32768:
@@ -158,6 +163,22 @@ def config_path(ctx=None) -> str:
     return os.path.join(config_directory(ctx), "config.json")
 
 
+def _quarantine_corrupt(path: str, error: Exception) -> None:
+    backup = path + ".bak"
+    if os.path.exists(backup):
+        backup = path + ".corrupt.bak"
+    try:
+        shutil.move(path, backup)
+        _LOG.warning(
+            "La configuración estaba dañada (%s). Se movió a %s; se usarán valores "
+            "predeterminados.",
+            error,
+            backup,
+        )
+    except OSError as exc:
+        _LOG.warning("No se pudo apartar la configuración dañada %s: %s", path, exc)
+
+
 def load_config(ctx=None) -> Config:
     path = config_path(ctx)
     data: dict[str, Any] = {}
@@ -168,7 +189,11 @@ def load_config(ctx=None) -> Config:
             data = raw
     except FileNotFoundError:
         pass
-    except (OSError, ValueError):
+    except ValueError as exc:
+        _quarantine_corrupt(path, exc)
+        data = {}
+    except OSError as exc:
+        _LOG.warning("No se pudo leer la configuración %s: %s", path, exc)
         data = {}
 
     config = Config(api_key=_clean_secret(data.get("api_key")))
@@ -180,6 +205,8 @@ def load_config(ctx=None) -> Config:
         "temperature": float,
         "max_context_chars": int,
         "confirm_before_apply": _as_bool,
+        "enable_local_files": _as_bool,
+        "enable_web_search": _as_bool,
     }
     for name, converter in converters.items():
         if name not in data:
@@ -214,11 +241,11 @@ def save_config(config: Config, ctx=None) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(config.as_dict(include_secret=True), handle, indent=2, ensure_ascii=False)
             handle.write("\n")
-        os.replace(temporary, path)
         try:
-            os.chmod(path, 0o600)
+            os.chmod(temporary, 0o600)
         except OSError:
             pass
+        os.replace(temporary, path)
     except Exception:
         try:
             os.unlink(temporary)

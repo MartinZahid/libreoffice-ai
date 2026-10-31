@@ -1,19 +1,24 @@
-﻿"""Native LibreOffice chat and settings dialogs."""
+"""Native LibreOffice chat and settings dialogs."""
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections import deque
 from typing import Any
 
 import unohelper
-from com.sun.star.awt import XActionListener, XCallback, XTopWindowListener
+from com.sun.star.awt import XActionListener, XCallback, XKeyListener, XTopWindowListener
 
 from core.agent import Agent
 from core.config import ConfigError, load_config
 from core.document_context import build_document_context
 from core.executor import Executor, describe_action
 from core.llm import LLMClient
+from core.query_tools import QueryRunner
+
+_LOG = logging.getLogger(__name__)
+PICK_COUNT = 10
 
 
 def _model(ctx: Any, service: str) -> Any:
@@ -35,8 +40,8 @@ def _add_control(
     for key, value in properties.items():
         try:
             control_model.setPropertyValue(key, value)
-        except Exception:
-            pass
+        except Exception as exc:
+            _LOG.debug("Propiedad %s no admitida en %s: %s", key, name, exc)
     for key, value in (
         ("PositionX", x),
         ("PositionY", y),
@@ -45,8 +50,8 @@ def _add_control(
     ):
         try:
             setattr(control_model, key, value)
-        except Exception:
-            pass
+        except Exception as exc:
+            _LOG.debug("No se pudo situar el control %s: %s", name, exc)
     dialog_model.insertByName(name, control_model)
     if layout is not None:
         layout.append((name, x, y, width, height))
@@ -108,6 +113,8 @@ def _add_button(
     height: int,
     label: str,
     layout: list[tuple[str, int, int, int, int]] | None = None,
+    help_text: str = "",
+    **properties: Any,
 ) -> None:
     _add_control(
         model,
@@ -119,6 +126,8 @@ def _add_button(
         height,
         layout,
         Label=label,
+        HelpText=help_text,
+        **properties,
     )
 
 
@@ -132,6 +141,8 @@ def _add_checkbox(
     label: str,
     checked: bool,
     layout: list[tuple[str, int, int, int, int]] | None = None,
+    help_text: str = "",
+    **properties: Any,
 ) -> None:
     _add_control(
         model,
@@ -144,6 +155,8 @@ def _add_checkbox(
         layout,
         Label=label,
         State=1 if checked else 0,
+        HelpText=help_text,
+        **properties,
     )
 
 
@@ -176,8 +189,8 @@ def _fit_dialog(
         pass
     try:
         dialog.setPosSize(x, y, width, height, 15)
-    except Exception:
-        pass
+    except Exception as exc:
+        _LOG.warning("No se pudo fijar el tamaño del diálogo: %s", exc)
 
 
 def _create_dialog(
@@ -201,8 +214,8 @@ def _create_dialog(
                 dialog.getControl(name).setPosSize(
                     left, top, control_width, control_height, 15
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                _LOG.debug("No se pudo recolocar el control %s: %s", name, exc)
     _fit_dialog(dialog, toolkit, width, height, anchor)
     return dialog
 
@@ -221,8 +234,8 @@ def _message(ctx: Any, parent: Any, title: str, message: str, error: bool = Fals
         box = toolkit.createMessageBox(parent_peer, box_type, buttons, title, message)
         box.execute()
         box.dispose()
-    except Exception:
-        pass
+    except Exception as exc:
+        _LOG.warning("No se pudo mostrar el mensaje «%s»: %s", title, exc)
 
 
 class _Callback(unohelper.Base, XCallback):
@@ -272,6 +285,18 @@ class _ActionListener(unohelper.Base, XActionListener):
         self._handler(self._command)
 
 
+class _KeyListener(unohelper.Base, XKeyListener):
+    def __init__(self, handler: Any):
+        self._handler = handler
+
+    def keyPressed(self, event: Any) -> None:
+        if int(getattr(event, "KeyCode", 0)) == 1280 and int(getattr(event, "Modifiers", 0)) & 2:
+            self._handler()
+
+    def keyReleased(self, event: Any) -> None:
+        pass
+
+
 class ChatDialog:
     """Modeless chat window bound to one frame."""
 
@@ -286,6 +311,7 @@ class ChatDialog:
         self._events: deque[tuple[int, str, Any]] = deque()
         self._pending: list[dict[str, Any]] = []
         self._applied = False
+        self._executor: Executor | None = None
         self._history = ""
         self._session_id: str | None = None
         self._agent: Agent | None = None
@@ -296,12 +322,17 @@ class ChatDialog:
         self._action_listeners = []
         self._callback = _Callback(self._on_async)
         self._async = _model(ctx, "com.sun.star.awt.AsyncCallback")
+        self._key_listener = _KeyListener(lambda: self._on_action("send"))
         self._dialog.addTopWindowListener(self._window_listener)
         for name in ("send", "stop", "apply", "discard", "new", "settings"):
             control = self._controls[name]
             listener = _ActionListener(self._on_action, name)
             control.addActionListener(listener)
             self._action_listeners.append(listener)
+        try:
+            self._controls["input"].addKeyListener(self._key_listener)
+        except Exception as exc:
+            _LOG.debug("No se pudo activar Ctrl+Enter: %s", exc)
         self._controls["history"].Text = "Asistente IA listo. Pide cambios para el documento activo.\n"
         self._set_running(False)
         self._render_pending()
@@ -309,48 +340,75 @@ class ChatDialog:
     def _build(self) -> None:
         model = _model(self.ctx, "com.sun.star.awt.UnoControlDialogModel")
         model.Width = 420
-        model.Height = 732
+        model.Height = 700
         try:
             model.Title = "Asistente IA"
         except Exception:
             pass
         layout: list[tuple[str, int, int, int, int]] = []
         _add_edit(
-            model, "history", 10, 10, 400, 440,
+            model, "history", 10, 10, 400, 400,
             layout, MultiLine=True, ReadOnly=True, VScroll=True,
+            Tabstop=False, TabIndex=0,
+            HelpText="Historial de la conversación con el asistente.",
         )
-        _add_label(model, "pending_label", 10, 458, 400, 16, "Cambios propuestos", layout)
+        _add_label(
+            model, "pending_label", 10, 414, 400, 16,
+            "Cambios propuestos (marca los que conservar)", layout,
+        )
         _add_edit(
-            model, "pending", 10, 476, 400, 60,
+            model, "pending", 10, 432, 400, 42,
             layout, MultiLine=True, ReadOnly=True, VScroll=True,
+            Tabstop=False, TabIndex=0,
+            HelpText="Resumen de los cambios aplicados como vista previa.",
         )
+        for index in range(PICK_COUNT):
+            _add_checkbox(
+                model, f"pick{index + 1}", 10 + index * 39, 478, 38, 18,
+                str(index + 1), True, layout,
+                help_text=f"Conservar el cambio {index + 1}.",
+                TabIndex=9 + index,
+            )
         _add_edit(
-            model, "input", 10, 544, 400, 90,
-            layout, MultiLine=True, VScroll=True,
+            model, "input", 10, 500, 400, 76,
+            layout, MultiLine=True, VScroll=True, Tabstop=True, TabIndex=1,
+            HelpText="Escribe tu petición. Ctrl+Enter para enviar.",
         )
-        _add_label(model, "status", 10, 642, 400, 16, "Listo", layout)
+        _add_label(
+            model, "hint", 10, 580, 400, 14,
+            "Ctrl+Enter envía · Enter añade una línea", layout,
+        )
+        _add_label(model, "status", 10, 596, 400, 16, "Listo", layout)
         _add_checkbox(
-            model, "context", 10, 662, 400, 20,
+            model, "context", 10, 616, 400, 20,
             "Incluir contexto del documento", True, layout,
+            help_text="Envía un resumen del documento activo al modelo.",
+            TabIndex=2,
         )
-        labels = (
-            ("send", "Enviar"),
-            ("stop", "Detener"),
-            ("apply", "Aceptar"),
-            ("discard", "Rechazar"),
-            ("new", "Nuevo"),
-            ("settings", "Ajustes"),
+        buttons = (
+            ("send", "Enviar", "Envía la petición al modelo.", 3),
+            ("stop", "Parar", "Detiene la espera de la respuesta.", 4),
+            ("apply", "Aceptar", "Conserva los cambios marcados.", 5),
+            ("discard", "Rechazar", "Deshace toda la vista previa.", 6),
+            ("new", "Nuevo", "Inicia una conversación nueva.", 7),
+            ("settings", "Ajustes", "Configura proveedor, modelo y clave.", 8),
         )
-        x = 10
-        for name, label in labels:
-            _add_button(model, name, x, 694, 62, 28, label, layout=layout)
-            x += 66
+        for index, (name, label, help_text, tab_index) in enumerate(buttons):
+            row = index // 3
+            column = index % 3
+            _add_button(
+                model, name, 10 + column * 132, 644 + row * 30, 126, 26,
+                label, layout=layout, help_text=help_text, TabIndex=tab_index,
+            )
         self._dialog = _create_dialog(self.ctx, model, layout, "right")
-        for name in ("history", "pending", "input", "status", "context", "send", "stop", "apply", "discard", "new", "settings"):
+        names = ["history", "pending", "input", "status", "context"]
+        names.extend(name for name, _, _, _ in buttons)
+        names.extend(f"pick{index + 1}" for index in range(PICK_COUNT))
+        for name in names:
             try:
                 self._controls[name] = self._dialog.getControl(name)
-            except Exception:
-                pass
+            except Exception as exc:
+                _LOG.warning("No se pudo obtener el control %s: %s", name, exc)
         try:
             self._dialog.Title = "Asistente IA"
         except Exception:
@@ -405,8 +463,11 @@ class ChatDialog:
         elif command == "settings":
             from ui.chat_settings import show_settings_dialog
 
-            show_settings_dialog(self.ctx, self._dialog)
-            self._config = load_config(self.ctx)
+            show_settings_dialog(self.ctx, self._dialog, on_close=self._reload_config)
+
+    def _reload_config(self) -> None:
+        self._config = load_config(self.ctx)
+        self._set_status("Ajustes actualizados.")
 
     def _document(self) -> Any:
         try:
@@ -432,6 +493,43 @@ class ChatDialog:
             self._controls[name].Text = value
         except Exception:
             pass
+
+    def _set_checkbox(self, name: str, checked: bool) -> None:
+        control = self._controls.get(name)
+        if control is None:
+            return
+        try:
+            control.getModel().State = 1 if checked else 0
+        except Exception:
+            try:
+                control.State = 1 if checked else 0
+            except Exception as exc:
+                _LOG.debug("No se pudo cambiar la casilla %s: %s", name, exc)
+
+    def _read_checkbox(self, name: str) -> bool:
+        control = self._controls.get(name)
+        if control is None:
+            return False
+        try:
+            return bool(control.getModel().State)
+        except Exception:
+            try:
+                return bool(control.State)
+            except Exception:
+                return False
+
+    def _reset_picks(self) -> None:
+        for index in range(PICK_COUNT):
+            self._set_checkbox(f"pick{index + 1}", True)
+
+    def _picked_actions(self) -> list[dict[str, Any]]:
+        if len(self._pending) > PICK_COUNT:
+            return list(self._pending)
+        return [
+            action
+            for index, action in enumerate(self._pending)
+            if self._read_checkbox(f"pick{index + 1}")
+        ]
 
     def _set_enabled(self, name: str, enabled: bool) -> None:
         control = self._controls.get(name)
@@ -461,7 +559,7 @@ class ChatDialog:
                 pass
 
     def _append_history(self, label: str, text: str) -> None:
-        block = f"\n{label}:\n{text.strip()}\n"
+        block = f"\n──────── {label} ────────\n{text.strip()}\n"
         self._history = (self._history + block)[-30000:]
         self._set_text("history", self._history)
 
@@ -475,12 +573,24 @@ class ChatDialog:
         self._set_enabled("settings", not running)
 
     def _render_pending(self) -> None:
+        for index in range(PICK_COUNT):
+            name = f"pick{index + 1}"
+            enabled = index < len(self._pending) and not self._running
+            self._set_enabled(name, enabled)
+            if index < len(self._pending):
+                description = describe_action(self._pending[index])[:200]
+                try:
+                    self._controls[name].getModel().HelpText = description
+                except Exception:
+                    pass
         if not self._pending:
             self._set_text("pending", "")
             self._set_enabled("apply", False)
             self._set_enabled("discard", False)
             return
         header = "Vista previa aplicada:" if self._applied else "Cambios propuestos:"
+        if len(self._pending) > PICK_COUNT:
+            header += f" {len(self._pending)} cambios; se aplicarán todos."
         lines = [header]
         lines.extend(
             f"{index + 1}. {describe_action(action)}"
@@ -496,6 +606,10 @@ class ChatDialog:
         if self._pending:
             self._reject_pending(silent=True)
             if self._pending:
+                self._set_status(
+                    "No se pudo rechazar la vista previa anterior. "
+                    "Deshazla manualmente o revisa el documento."
+                )
                 return
         text = self._text("input").strip()
         if not text:
@@ -528,16 +642,21 @@ class ChatDialog:
         self._append_history("Tú", text)
         self._pending = []
         self._applied = False
+        self._executor = None
+        self._reset_picks()
         self._render_pending()
         self._set_running(True)
         self._set_status("Consultando al modelo...")
 
         client = LLMClient(config, self._session_id)
         self._session_id = client.session_id
+        runner = QueryRunner(config)
         if self._agent is None:
-            self._agent = Agent(client)
+            self._agent = Agent(client, runner)
         else:
             self._agent.client = client
+            self._agent.query_runner = runner
+            self._agent.refresh_system_prompt()
 
         self._generation += 1
         token = self._generation
@@ -547,7 +666,22 @@ class ChatDialog:
             args=(self._agent, token, text, context, self._stop_event),
             daemon=True,
         )
+        progress = threading.Thread(
+            target=self._progress_worker,
+            args=(token, self._stop_event),
+            daemon=True,
+        )
         worker.start()
+        progress.start()
+
+    def _progress_worker(self, token: int, stop_event: threading.Event) -> None:
+        dots = ("", ".", "..", "...")
+        index = 0
+        while not stop_event.wait(0.7):
+            if self._closed:
+                return
+            self._post_event(token, "progress", dots[index % len(dots)])
+            index += 1
 
     def _run_worker(self, agent: Agent, token: int, text: str, context: str, stop_event: threading.Event) -> None:
         try:
@@ -567,8 +701,8 @@ class ChatDialog:
             self._events.append((token, kind, payload))
         try:
             self._async.addCallback(self._callback, "ui")
-        except Exception:
-            pass
+        except Exception as exc:
+            _LOG.warning("No se pudo notificar a la interfaz: %s", exc)
 
     def _on_async(self, data: Any) -> None:
         while not self._closed:
@@ -585,8 +719,16 @@ class ChatDialog:
                 self._handle_error(str(payload))
             elif kind == "stopped":
                 self._handle_stopped()
+            elif kind == "progress":
+                self._handle_progress(str(payload))
+
+    def _handle_progress(self, dots: str) -> None:
+        if self._running:
+            self._set_status(f"Consultando al modelo{dots}" + ("..." if not dots else ""))
 
     def _handle_done(self, result: Any) -> None:
+        if self._stop_event is not None:
+            self._stop_event.set()
         self._set_running(False)
         self._stop_event = None
         if result.errors:
@@ -595,6 +737,8 @@ class ChatDialog:
             self._append_history("Asistente", result.text)
         self._pending = list(result.actions)
         self._applied = False
+        self._executor = None
+        self._reset_picks()
         if self._pending:
             self._apply_preview()
         else:
@@ -602,12 +746,16 @@ class ChatDialog:
             self._set_status("Respuesta recibida.")
 
     def _handle_error(self, message: str) -> None:
+        if self._stop_event is not None:
+            self._stop_event.set()
         self._set_running(False)
         self._stop_event = None
         self._set_status("No se pudo completar la petición.")
         self._append_history("Error", message)
 
     def _handle_stopped(self) -> None:
+        if self._stop_event is not None:
+            self._stop_event.set()
         self._set_running(False)
         self._stop_event = None
         self._set_status("Petición detenida.")
@@ -624,10 +772,12 @@ class ChatDialog:
             return
         document = self._document()
         try:
-            descriptions = Executor().apply(document, self._pending)
+            self._executor = Executor()
+            descriptions = self._executor.apply(document, self._pending)
         except Exception as exc:
             self._pending = []
             self._applied = False
+            self._executor = None
             if self._agent is not None:
                 self._agent.resolve_pending(False, "No se pudieron aplicar los cambios.")
             self._render_pending()
@@ -647,14 +797,70 @@ class ChatDialog:
     def _accept_pending(self) -> None:
         if not self._pending or self._running:
             return
-        count = len(self._pending)
+        selected = self._picked_actions()
+        if not selected:
+            self._reject_pending()
+            if not self._pending:
+                self._set_status("No marcaste cambios: se rechazó la vista previa.")
+            return
+        total = len(self._pending)
+        if len(selected) == total:
+            if self._agent is not None:
+                self._agent.resolve_pending(True)
+            if self._executor is not None:
+                self._executor.accept()
+            self._pending = []
+            self._applied = False
+            self._executor = None
+            self._render_pending()
+            self._append_history("Cambios aceptados", f"{total} cambio(s) se mantienen.")
+            self._set_status("Cambios aceptados. Se mantienen en el documento.")
+            return
+
+        document = self._document()
+        try:
+            if self._executor is None:
+                raise ValueError("No hay una vista previa que se pueda filtrar.")
+            self._executor.revert(document)
+        except Exception as exc:
+            self._set_status("No se pudo deshacer la vista previa para filtrar los cambios.")
+            self._append_history("Error al aceptar", str(exc))
+            _message(self.ctx, self._dialog, "Asistente IA", str(exc), error=True)
+            return
+
+        try:
+            replacement = Executor()
+            replacement.apply(document, selected)
+            replacement.accept()
+        except Exception as exc:
+            self._pending = []
+            self._applied = False
+            self._executor = None
+            if self._agent is not None:
+                self._agent.resolve_pending(False, "No se pudieron conservar los cambios marcados.")
+            self._render_pending()
+            self._set_status("No se pudieron conservar los cambios marcados.")
+            self._append_history("Error al aceptar", str(exc))
+            _message(self.ctx, self._dialog, "Asistente IA", str(exc), error=True)
+            return
+
+        rejected = total - len(selected)
         if self._agent is not None:
-            self._agent.resolve_pending(True)
+            self._agent.resolve_pending(
+                True,
+                f"Se conservaron {len(selected)} de {total} cambios propuestos.",
+            )
         self._pending = []
         self._applied = False
+        self._executor = None
         self._render_pending()
-        self._append_history("Cambios aceptados", f"{count} cambio(s) se mantienen.")
-        self._set_status("Cambios aceptados. Se mantienen en el documento.")
+        self._append_history(
+            "Cambios aceptados",
+            f"{len(selected)} cambio(s) se mantienen; {rejected} se descartaron.",
+        )
+        self._set_status(
+            f"{len(selected)} cambio(s) aceptados; {rejected} descartados."
+        )
 
     def _reject_pending(self, silent: bool = False) -> None:
         if self._running or not self._pending:
@@ -662,7 +868,9 @@ class ChatDialog:
         count = len(self._pending)
         if self._applied:
             try:
-                Executor.revert(self._document())
+                if self._executor is None:
+                    raise ValueError("No hay una vista previa registrada por este chat.")
+                self._executor.revert(self._document())
             except Exception as exc:
                 if not silent:
                     self._set_status("No se pudo deshacer la vista previa.")
@@ -674,6 +882,8 @@ class ChatDialog:
             self._agent.resolve_pending(False)
         self._pending = []
         self._applied = False
+        self._executor = None
+        self._reset_picks()
         self._render_pending()
         if not silent:
             self._set_status("Cambios rechazados y deshechos.")
@@ -682,10 +892,11 @@ class ChatDialog:
         self._new_chat()
 
     def _new_chat(self) -> None:
-        if self._running:
-            self._generation += 1
-            if self._stop_event is not None:
-                self._stop_event.set()
+        self._generation += 1
+        if self._running and self._stop_event is not None:
+            self._stop_event.set()
+        self._stop_event = None
+        self._set_running(False)
         with self._lock:
             self._events.clear()
         if self._pending:
@@ -697,6 +908,8 @@ class ChatDialog:
         self._session_id = None
         self._pending = []
         self._applied = False
+        self._executor = None
+        self._reset_picks()
         self._history = ""
         self._set_text("history", "Asistente IA listo. Pide cambios para el documento activo.\n")
         self._set_text("input", "")

@@ -28,6 +28,14 @@ def _tool(name: str, description: str, properties: dict[str, Any], required: lis
 
 _NUMBER = {"type": "number"}
 
+CELL_VALUE = {"type": ["string", "number", "boolean", "null"]}
+
+CELL_MATRIX = {
+    "type": "array",
+    "description": "Matriz de filas. Cada fila es una lista de celdas.",
+    "items": {"type": "array", "items": CELL_VALUE},
+}
+
 
 TEXT_STYLE = {
     "type": "string",
@@ -88,12 +96,8 @@ TOOLS: list[dict[str, Any]] = [
         "writer_insert_table",
         "Inserta una tabla en Writer a partir de una matriz de filas y columnas.",
         {
-            "data": {
-                "type": "array",
-                "description": "Matriz de filas. Cada fila es una lista de celdas.",
-                "items": {"type": "array", "items": {"type": ["string", "number", "boolean", "null"]}},
-            },
-            "header": {"type": "boolean", "description": "Usar la primera fila como encabezado."},
+            "data": CELL_MATRIX,
+            "header": {"type": "boolean", "description": "Usar la primera fila como encabezado. Por defecto, sí."},
             "style": {"type": "string", "description": "Nombre de estilo de tabla de LibreOffice, por ejemplo Default Style."},
             "position": POSITION,
         },
@@ -150,11 +154,7 @@ TOOLS: list[dict[str, Any]] = [
         {
             "sheet": {"type": "string", "description": "Hoja destino. Si se omite, la hoja activa."},
             "start_cell": {"type": "string", "description": "Celda inicial, por ejemplo A1."},
-            "values": {
-                "type": "array",
-                "description": "Matriz de filas con valores. Las cadenas que empiezan por = se tratan como fórmulas.",
-                "items": {"type": "array", "items": {"type": ["string", "number", "boolean", "null"]}},
-            },
+            "values": CELL_MATRIX,
         },
         ["start_cell", "values"],
     ),
@@ -164,11 +164,8 @@ TOOLS: list[dict[str, Any]] = [
         {
             "sheet": {"type": "string"},
             "start_cell": {"type": "string"},
-            "data": {
-                "type": "array",
-                "items": {"type": "array", "items": {"type": ["string", "number", "boolean", "null"]}},
-            },
-            "header": {"type": "boolean"},
+            "data": CELL_MATRIX,
+            "header": {"type": "boolean", "description": "Usar la primera fila como encabezado. Por defecto, sí."},
         },
         ["start_cell", "data"],
     ),
@@ -315,7 +312,88 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
+QUERY_TOOLS: list[dict[str, Any]] = [
+    _tool(
+        "list_local_images",
+        (
+            "Lista imagenes locales de una carpeta para poder insertarlas en el documento. "
+            "No lee ni envia el contenido de los archivos. Si no se indica ruta, usa Pictures."
+        ),
+        {
+            "path": {
+                "type": "string",
+                "description": "Carpeta absoluta que se quiere revisar. Ejemplo: C:\\Users\\Nombre\\Pictures\\Mac aleatoria",
+            },
+            "recursive": {
+                "type": "boolean",
+                "description": "Incluir subcarpetas. Por defecto, no.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximo de imagenes a devolver (1 a 500). Por defecto, 200.",
+            },
+        },
+    ),
+    _tool(
+        "search_web",
+        (
+            "Busca informacion actual en Internet y devuelve titulo, URL y resumen. "
+            "Usa fetch_web_page para leer una pagina concreta."
+        ),
+        {
+            "query": {"type": "string", "description": "Consulta de busqueda."},
+            "max_results": {
+                "type": "integer",
+                "description": "Numero de resultados (1 a 8). Por defecto, 5.",
+            },
+        },
+        ["query"],
+    ),
+    _tool(
+        "search_images",
+        (
+            "Busca imagenes en Internet y devuelve URLs directas. "
+            "Despues usa download_image para obtener una copia local."
+        ),
+        {
+            "query": {"type": "string", "description": "Descripcion de las imagenes buscadas."},
+            "max_results": {
+                "type": "integer",
+                "description": "Numero de imagenes (1 a 10). Por defecto, 6.",
+            },
+        },
+        ["query"],
+    ),
+    _tool(
+        "fetch_web_page",
+        "Lee el texto de una pagina web publica para consultar o resumir su contenido.",
+        {
+            "url": {"type": "string", "description": "URL http o https de la pagina."},
+            "max_chars": {
+                "type": "integer",
+                "description": "Maximo de caracteres del texto (1000 a 15000).",
+            },
+        },
+        ["url"],
+    ),
+    _tool(
+        "download_image",
+        (
+            "Descarga una imagen publica de Internet en una carpeta temporal local. "
+            "Devuelve la ruta que puedes usar con writer_insert_image o impress_insert_image."
+        ),
+        {
+            "url": {"type": "string", "description": "URL directa de la imagen."},
+        },
+        ["url"],
+    ),
+]
+
+
 TOOLS_BY_NAME = {tool["function"]["name"]: tool for tool in TOOLS}
+QUERY_TOOLS_BY_NAME = {tool["function"]["name"]: tool for tool in QUERY_TOOLS}
+ALL_TOOLS_BY_NAME = {**TOOLS_BY_NAME, **QUERY_TOOLS_BY_NAME}
+QUERY_TOOL_NAMES = frozenset(QUERY_TOOLS_BY_NAME)
 
 
 def _type_matches(value: Any, expected: str) -> bool:
@@ -358,9 +436,14 @@ def _validate_value(name: str, value: Any, schema: dict[str, Any], path: str) ->
                 _validate_value(name, item, properties[key], f"{path}.{key}")
 
 
-def parse_arguments(name: str, raw_arguments: Any) -> dict[str, Any]:
+def parse_arguments(
+    name: str,
+    raw_arguments: Any,
+    catalog: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Parse and validate the JSON arguments of a tool call."""
-    if name not in TOOLS_BY_NAME:
+    available = catalog if catalog is not None else TOOLS_BY_NAME
+    if name not in available:
         raise ToolError(f"Herramienta desconocida: {name}")
 
     if isinstance(raw_arguments, str):
@@ -378,7 +461,7 @@ def parse_arguments(name: str, raw_arguments: Any) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         raise ToolError(f"Los argumentos de {name} deben ser un objeto JSON.")
 
-    schema = TOOLS_BY_NAME[name]["function"]["parameters"]
+    schema = available[name]["function"]["parameters"]
     for required in schema.get("required", []):
         if required not in arguments or arguments[required] in (None, ""):
             raise ToolError(f"Falta el argumento obligatorio '{required}' en {name}.")

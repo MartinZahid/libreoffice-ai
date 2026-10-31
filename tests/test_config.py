@@ -84,6 +84,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(
             config.base_url, "https://opencode.ai/inference/go/openai/v1"
         )
+        self.assertTrue(config.enable_local_files)
+        self.assertTrue(config.enable_web_search)
 
     def test_validate_rejects_bad_values(self):
         with self.assertRaises(ConfigError):
@@ -112,13 +114,20 @@ class ConfigTests(unittest.TestCase):
     def test_save_and_load_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.dict(os.environ, {"APPDATA": directory}, clear=True):
-                config = Config(api_key="key-123", model="deepseek-v4.1-flash")
+                config = Config(
+                    api_key="key-123",
+                    model="deepseek-v4.1-flash",
+                    enable_local_files=False,
+                    enable_web_search=False,
+                )
                 save_config(config)
                 path = Path(directory) / "LibreOffice" / "4" / "user" / "LibreOfficeAI" / "config.json"
                 self.assertTrue(path.exists())
                 loaded = load_config()
                 self.assertEqual(loaded.api_key, "key-123")
                 self.assertEqual(loaded.model, "deepseek-v4.1-flash")
+                self.assertFalse(loaded.enable_local_files)
+                self.assertFalse(loaded.enable_web_search)
                 raw = json.loads(path.read_text(encoding="utf-8"))
                 self.assertEqual(raw["api_key"], "key-123")
 
@@ -131,6 +140,11 @@ class ConfigTests(unittest.TestCase):
                 loaded = load_config()
                 self.assertEqual(loaded.base_url, Config().base_url)
                 self.assertEqual(loaded.api_key, "")
+                self.assertFalse((path / "config.json").exists())
+                self.assertEqual(
+                    (path / "config.json.bak").read_text(encoding="utf-8"),
+                    "{bad json",
+                )
 
     def test_invalid_field_preserves_api_key_and_valid_fields(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 from urllib.parse import urlparse
 
 from .adapters.common import document_kind, selection_text
+from .config import DEFAULT_MAX_CONTEXT_CHARS
+
+_LOG = logging.getLogger(__name__)
 
 MAX_SELECTION_CHARS = 4000
 MAX_PARAGRAPH_CHARS = 2000
@@ -32,14 +36,14 @@ def _title(doc: Any) -> str:
         title = str(doc.getTitle() or "").strip()
         if title:
             return _safe_name(title)
-    except Exception:
-        pass
+    except Exception as exc:
+        _LOG.debug("No se pudo leer el título del documento: %s", exc)
     try:
         url = str(doc.getURL() or "")
         if url:
             return _safe_name(urlparse(url).path)
-    except Exception:
-        pass
+    except Exception as exc:
+        _LOG.debug("No se pudo leer la URL del documento: %s", exc)
     return "Sin título"
 
 
@@ -59,8 +63,8 @@ def _writer_context(doc: Any) -> list[str]:
             text = str(paragraph.getString() or "")
             if text:
                 parts.append("Párrafo actual:\n" + text[:MAX_PARAGRAPH_CHARS])
-    except Exception:
-        pass
+    except Exception as exc:
+        _LOG.debug("No se pudo leer el contexto de Writer: %s", exc)
     return parts
 
 
@@ -79,22 +83,29 @@ def _calc_context(doc: Any) -> list[str]:
         end_column = address.EndColumn + 1
         end_row = address.EndRow + 1
         parts.append(f"Rango seleccionado: {start_column},{start_row} a {end_column},{end_row}")
-        data = selection.getDataArray()
-        rows = min(len(data), MAX_CELL_ROWS)
-        preview = []
-        for row in data[:rows]:
-            preview.append(list(row[:MAX_CELL_COLUMNS]))
+        limited_end_column = min(
+            address.EndColumn, address.StartColumn + MAX_CELL_COLUMNS - 1
+        )
+        limited_end_row = min(address.EndRow, address.StartRow + MAX_CELL_ROWS - 1)
+        limited = sheet.getCellRangeByPosition(
+            address.StartColumn,
+            address.StartRow,
+            limited_end_column,
+            limited_end_row,
+        )
+        preview = [list(row) for row in limited.getDataArray()]
         if preview:
             parts.append("Valores visibles:\n" + repr(preview))
-    except Exception:
-        pass
+    except Exception as exc:
+        _LOG.debug("No se pudo leer el contexto de Calc: %s", exc)
     return parts
 
 
 def _shape_text(shape: Any) -> str:
     try:
         return str(shape.String or "").strip()
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("No se pudo leer el texto de una forma: %s", exc)
         return ""
 
 
@@ -120,12 +131,14 @@ def _impress_context(doc: Any) -> list[str]:
                     shapes.append(text[:1000])
             if shapes:
                 parts.append("Textos de la diapositiva:\n" + "\n---\n".join(shapes))
-    except Exception:
-        pass
+    except Exception as exc:
+        _LOG.debug("No se pudo leer el contexto de Impress: %s", exc)
     return parts
 
 
-def build_document_context(doc: Any, max_chars: int = 12000) -> str:
+def build_document_context(
+    doc: Any, max_chars: int = DEFAULT_MAX_CONTEXT_CHARS
+) -> str:
     """Return a short context block that is safe to send to the model."""
     if doc is None:
         return "No hay un documento abierto."
@@ -139,6 +152,7 @@ def build_document_context(doc: Any, max_chars: int = 12000) -> str:
     elif kind in ("impress", "draw"):
         parts.extend(_impress_context(doc))
     context = "\n\n".join(parts)
+    marker = "\n...[contexto truncado]"
     if len(context) > max_chars:
-        context = context[:max_chars].rstrip() + "\n...[contexto truncado]"
+        context = context[: max(0, max_chars - len(marker))].rstrip() + marker
     return context
